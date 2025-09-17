@@ -4,6 +4,7 @@ import * as https from 'https';
 import { URL } from 'url';
 import { detectLanguageFromCode, getFileExtension } from './language-detection';
 import { cleanAICodeResponse, extractPureCode } from './code-cleaner';
+import { DatabaseManager, ChatSession, ChatMessage as DBChatMessage, GeneratedFile } from './database-manager';
 import * as path from 'path';
 
 type OpenAIResponse = {
@@ -48,6 +49,9 @@ type OpenAIChatResponse = {
 
 type LogLevel = 'none' | 'info' | 'debug';
 const outputChannel = vscode.window.createOutputChannel('AI Autocomplete');
+
+// 全局数据库管理器
+let dbManager: DatabaseManager;
 function log(level: LogLevel, message: string, details?: unknown) {
     const cfg = getConfiguration();
     const configured = cfg.logLevel;
@@ -75,6 +79,10 @@ function getConfiguration() {
         stream: config.get<boolean>('stream', false),
         timeoutMs: config.get<number>('timeoutMs', 120000),
         logLevel: (config.get<string>('logLevel', 'info') as LogLevel) || 'info',
+        useDatabase: config.get<boolean>('useDatabase', true),
+        maxHistoryDays: config.get<number>('maxHistoryDays', 30),
+        autoSaveGenerated: config.get<boolean>('autoSaveGenerated', true),
+        storageStrategy: (config.get<string>('storageStrategy', 'workspace') as 'workspace' | 'global') || 'workspace',
     };
 }
 
@@ -242,6 +250,14 @@ async function generateAndInsert(editor: vscode.TextEditor) {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    // 初始化数据库管理器
+    const cfg = getConfiguration();
+    dbManager = new DatabaseManager(context, cfg.storageStrategy);
+    dbManager.initialize().catch(err => {
+        console.error('Failed to initialize database:', err);
+        vscode.window.showWarningMessage('数据库初始化失败，将使用本地存储模式');
+    });
+
     const genDisposable = vscode.commands.registerTextEditorCommand('ccdc.generateCode', async (editor) => {
         await generateAndInsert(editor);
     });
@@ -267,9 +283,91 @@ export function activate(context: vscode.ExtensionContext) {
         await saveCodeToFile(code, language);
     });
     context.subscriptions.push(saveCodeToFileCommand);
+
+    // 数据库管理命令
+    const exportHistoryCommand = vscode.commands.registerCommand('ccdc.exportHistory', async () => {
+        try {
+            const exportData = await dbManager.exportData();
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file('ccdc-chat-history-export.json'),
+                filters: { 'JSON Files': ['json'] }
+            });
+            
+            if (uri) {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(exportData, null, 2), 'utf8'));
+                vscode.window.showInformationMessage('聊天历史已导出');
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`导出失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(exportHistoryCommand);
+
+    const importHistoryCommand = vscode.commands.registerCommand('ccdc.importHistory', async () => {
+        try {
+            const uris = await vscode.window.showOpenDialog({
+                canSelectFiles: true,
+                canSelectMany: false,
+                filters: { 'JSON Files': ['json'] }
+            });
+            
+            if (uris && uris[0]) {
+                const fileContent = await vscode.workspace.fs.readFile(uris[0]);
+                const importData = JSON.parse(fileContent.toString());
+                await dbManager.importData(importData);
+                vscode.window.showInformationMessage('聊天历史已导入');
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`导入失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(importHistoryCommand);
+
+    const clearHistoryCommand = vscode.commands.registerCommand('ccdc.clearHistory', async () => {
+        const result = await vscode.window.showWarningMessage(
+            '确定要清空所有聊天历史吗？此操作不可撤销！',
+            '确定', '取消'
+        );
+        
+        if (result === '确定') {
+            try {
+                await dbManager.importData({ sessions: [], messages: [], generated_files: [], context_files: [] });
+                vscode.window.showInformationMessage('聊天历史已清空');
+            } catch (error) {
+                vscode.window.showErrorMessage(`清空失败: ${error}`);
+            }
+        }
+    });
+    context.subscriptions.push(clearHistoryCommand);
+
+    const showStatsCommand = vscode.commands.registerCommand('ccdc.showStats', async () => {
+        try {
+            const stats = await dbManager.getStats();
+            const message = `📊 CCDC AI 统计信息：
+• 聊天会话：${stats.totalSessions} 个
+• 消息总数：${stats.totalMessages} 条
+• 生成文件：${stats.totalGeneratedFiles} 个
+• 数据库大小：${(stats.dbSize / 1024).toFixed(2)} KB
+
+📈 语言统计：
+${Object.entries(stats.languageStats).map(([lang, count]) => `• ${lang}: ${count} 个文件`).join('\n')}`;
+
+            vscode.window.showInformationMessage(message);
+        } catch (error) {
+            vscode.window.showErrorMessage(`获取统计信息失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(showStatsCommand);
 }
 
-export function deactivate() {}
+export function deactivate() {
+    // 关闭数据库连接
+    if (dbManager) {
+        dbManager.close().catch(err => {
+            console.error('Failed to close database:', err);
+        });
+    }
+}
 
 // ===== Configuration Panel =====
 class ConfigurationPanel {
@@ -583,7 +681,7 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     });
 }
 
-async function saveCodeToFile(code: string, language: string): Promise<string> {
+async function saveCodeToFile(code: string, language: string, sessionId?: string, messageId?: number): Promise<string> {
     let baseFileName = 'generated';
     let fileExtension = '';
 
@@ -628,6 +726,34 @@ async function saveCodeToFile(code: string, language: string): Promise<string> {
 
     // 写入文件
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(finalCode, 'utf8'));
+    
+    // 获取文件大小
+    let fileSize = 0;
+    try {
+        const stat = await vscode.workspace.fs.stat(fileUri);
+        fileSize = stat.size;
+    } catch (error) {
+        console.error('Failed to get file size:', error);
+    }
+
+    // 将生成的文件信息保存到数据库
+    try {
+        const generatedFile: Omit<GeneratedFile, 'id' | 'created_at'> = {
+            session_id: sessionId,
+            message_id: messageId,
+            file_name: fileName,
+            file_path: fileUri.fsPath,
+            language: language,
+            original_code: code,
+            cleaned_code: finalCode,
+            file_size: fileSize
+        };
+        
+        await dbManager.addGeneratedFile(generatedFile);
+        log('info', 'Generated file record saved to database', { fileName, language, fileSize });
+    } catch (error) {
+        console.error('Failed to save generated file record:', error);
+    }
     
     // 显示保存信息
     const message = cleanedCode.hasCodeBlocks 
@@ -1370,53 +1496,48 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             const sendBtnEl = document.getElementById('send-btn');
             const pauseBtnEl = document.getElementById('pause-btn');
             
-            // 历史记录管理
-            let chatHistory = JSON.parse(localStorage.getItem('ccdc_chat_history') || '[]');
+            // 页面加载时初始化聊天历史
+            loadChatHistoryFromDatabase();
+            
+            // 历史记录管理 - 使用数据库
+            let chatHistory = [];
             let currentChatId = null;
 
-            // 保存聊天记录到本地存储
-            function saveChatHistory() {
-                localStorage.setItem('ccdc_chat_history', JSON.stringify(chatHistory));
+            // 从数据库加载历史记录
+            function loadChatHistoryFromDatabase() {
+                vscode.postMessage({ type: 'loadChatHistory' });
             }
 
             // 创建新聊天
             function createNewChat() {
-                currentChatId = Date.now().toString();
-                const newChat = {
-                    id: currentChatId,
-                    title: '新对话',
-                    messages: [],
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
-                };
-                chatHistory.unshift(newChat);
-                saveChatHistory();
-                return newChat;
+                vscode.postMessage({ type: 'createNewChat' });
             }
 
             // 更新当前聊天标题
             function updateChatTitle(title) {
                 if (currentChatId) {
-                    const chat = chatHistory.find(c => c.id === currentChatId);
-                    if (chat) {
-                        chat.title = title;
-                        chat.updatedAt = new Date().toISOString();
-                        saveChatHistory();
-                    }
+                    vscode.postMessage({ 
+                        type: 'updateChatTitle', 
+                        chatId: currentChatId, 
+                        title: title 
+                    });
                 }
             }
 
-            // 添加消息到当前聊天
-            function addMessageToCurrentChat(role, content) {
-                if (!currentChatId) {
-                    createNewChat();
-                }
-                const chat = chatHistory.find(c => c.id === currentChatId);
-                if (chat) {
-                    chat.messages.push({ role, content, timestamp: new Date().toISOString() });
-                    chat.updatedAt = new Date().toISOString();
-                    saveChatHistory();
-                }
+            // 删除聊天记录
+            function deleteChatFromDatabase(chatId) {
+                vscode.postMessage({ 
+                    type: 'deleteChat', 
+                    chatId: chatId 
+                });
+            }
+
+            // 加载聊天记录
+            function loadChatFromDatabase(chatId) {
+                vscode.postMessage({ 
+                    type: 'loadChat', 
+                    chatId: chatId 
+                });
             }
 
             // 渲染历史记录面板
@@ -1452,30 +1573,17 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
 
             // 加载聊天记录
             function loadChat(chatId) {
-                const chat = chatHistory.find(c => c.id === chatId);
-                if (chat) {
-                    currentChatId = chatId;
-                    messagesEl.innerHTML = '';
-                    chat.messages.forEach(msg => {
-                        append(msg.role, msg.content);
-                    });
-                    messagesEl.scrollTop = messagesEl.scrollHeight;
-                }
+                currentChatId = chatId;
+                loadChatFromDatabase(chatId);
             }
 
             // 删除聊天记录
             function deleteChat(chatId) {
-                const index = chatHistory.findIndex(c => c.id === chatId);
-                if (index !== -1) {
-                    chatHistory.splice(index, 1);
-                    saveChatHistory();
-                    // 如果删除的是当前聊天，清空显示
-                    if (currentChatId === chatId) {
-                        currentChatId = null;
-                        messagesEl.innerHTML = '';
-                    }
-                    // 重新渲染历史面板
-                    renderHistoryPanel();
+                deleteChatFromDatabase(chatId);
+                // 如果删除的是当前聊天，清空显示
+                if (currentChatId === chatId) {
+                    currentChatId = null;
+                    messagesEl.innerHTML = '';
                 }
             }
 
@@ -1539,15 +1647,6 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 // 如果没有当前聊天，创建一个新的
                 if (!currentChatId) {
                     createNewChat();
-                }
-                
-                // 保存用户消息到历史记录
-                addMessageToCurrentChat('user', displayText);
-                
-                // 更新聊天标题（使用第一条用户消息）
-                if (chatHistory.find(c => c.id === currentChatId)?.messages.length === 1) {
-                    const title = text.length > 20 ? text.substring(0, 20) + '...' : text;
-                    updateChatTitle(title);
                 }
                 
                 inputEl.value = '';
@@ -1661,7 +1760,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             if (historyBtnEl && historyPanelEl) {
                 historyBtnEl.addEventListener('click', () => {
                     if (historyPanelEl.style.display === 'none' || !historyPanelEl.style.display) {
-                        renderHistoryPanel();
+                        loadChatHistoryFromDatabase();
                         historyPanelEl.style.display = 'block';
                     } else {
                         historyPanelEl.style.display = 'none';
@@ -1783,10 +1882,6 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     hideLoading();
                     // 在模型生成完内容后添加保存按钮
                     addSaveButtonToLastMessage();
-                    // 保存助手消息到历史记录
-                    if (lastAssistantEl) {
-                        addMessageToCurrentChat('assistant', lastAssistantEl.textContent || '');
-                    }
                     // 注意：不清除上下文选择，保持用户选择的文件
                 }
                 if (msg.type === 'showContextPanel' && filePanelEl) {
@@ -1814,6 +1909,31 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 }
                 if (msg.type === 'stopGenerating') {
                     hideLoading();
+                }
+                if (msg.type === 'chatHistoryLoaded') {
+                    console.log('ChatPanel: Received chat history from database:', msg.history);
+                    chatHistory = msg.history || [];
+                    console.log('ChatPanel: Updated chatHistory:', chatHistory);
+                    renderHistoryPanel();
+                }
+                if (msg.type === 'chatCreated') {
+                    currentChatId = msg.chatId;
+                    console.log('ChatPanel: New chat created:', currentChatId);
+                }
+                if (msg.type === 'chatLoaded') {
+                    messagesEl.innerHTML = '';
+                    currentChatId = msg.chatId;
+                    msg.messages.forEach(message => {
+                        append(message.role, message.content);
+                    });
+                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                    console.log('ChatPanel: Chat loaded:', currentChatId);
+                }
+                if (msg.type === 'chatDeleted') {
+                    // 从本地历史记录中移除
+                    chatHistory = chatHistory.filter(chat => chat.id !== msg.chatId);
+                    renderHistoryPanel();
+                    console.log('ChatPanel: Chat deleted:', msg.chatId);
                 }
             });
         `;
@@ -1889,6 +2009,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _messages: any[] = [];
     private _currentController: AbortController | null = null;
+    private _currentSessionId: string | null = null;
 
     constructor(private readonly _extensionUri: vscode.Uri) {}
     
@@ -1924,6 +2045,24 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                     } else {
                         log('info', 'ChatViewProvider: 收到send消息但既无text也无fileContent', { message });
                     }
+                    break;
+                case 'migrateHistory':
+                    await this.handleMigrateHistory(message.data);
+                    break;
+                case 'loadChatHistory':
+                    await this.handleLoadChatHistory();
+                    break;
+                case 'createNewChat':
+                    await this.handleCreateNewChat();
+                    break;
+                case 'updateChatTitle':
+                    await this.handleUpdateChatTitle(message.chatId, message.title);
+                    break;
+                case 'deleteChat':
+                    await this.handleDeleteChat(message.chatId);
+                    break;
+                case 'loadChat':
+                    await this.handleLoadChat(message.chatId);
                     break;
                 case 'stop':
                     this.handleStop();
@@ -2013,7 +2152,155 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private async handleMigrateHistory(localStorageData: any[]): Promise<void> {
+        try {
+            await dbManager.migrateFromLocalStorage(localStorageData);
+            this._view?.webview.postMessage({ type: 'migrationComplete' });
+            vscode.window.showInformationMessage('历史数据迁移完成');
+        } catch (error) {
+            this._view?.webview.postMessage({ type: 'migrationError', error: String(error) });
+            vscode.window.showErrorMessage(`迁移失败: ${error}`);
+        }
+    }
+
+    private async handleLoadChatHistory(): Promise<void> {
+        try {
+            const sessions = await dbManager.getChatSessions();
+            const history = [];
+            
+            for (const session of sessions) {
+                // 获取每个会话的消息数量
+                const messages = await dbManager.getMessages(session.id);
+                
+                // 只包含有消息的会话
+                if (messages.length > 0) {
+                    history.push({
+                        id: session.id,
+                        title: session.title,
+                        messages: [{ role: 'user', content: messages[0]?.content || '' }], // 至少包含一条消息用于显示
+                        createdAt: session.created_at,
+                        updatedAt: session.updated_at
+                    });
+                }
+            }
+            
+            console.log('Processed chat history for frontend:', history);
+            
+            this._view?.webview.postMessage({ 
+                type: 'chatHistoryLoaded', 
+                history: history 
+            });
+        } catch (error) {
+            console.error('Failed to load chat history:', error);
+        }
+    }
+
+    private async handleCreateNewChat() {
+        try {
+            const newSession = await this.createNewChatSession('新对话');
+            this._view?.webview.postMessage({ 
+                type: 'chatCreated', 
+                chatId: newSession 
+            });
+        } catch (error) {
+            console.error('Failed to create new chat:', error);
+        }
+    }
+
+
+    private async handleUpdateChatTitle(chatId: string, title: string) {
+        try {
+            await dbManager.updateChatSession(chatId, { title });
+        } catch (error) {
+            console.error('Failed to update chat title:', error);
+        }
+    }
+
+    private async handleDeleteChat(chatId: string) {
+        try {
+            await dbManager.deleteChatSession(chatId);
+            this._view?.webview.postMessage({ 
+                type: 'chatDeleted', 
+                chatId: chatId 
+            });
+        } catch (error) {
+            console.error('Failed to delete chat:', error);
+        }
+    }
+
+    private async handleLoadChat(chatId: string) {
+        try {
+            const messages = await dbManager.getMessages(chatId);
+            const formattedMessages = messages.map(msg => ({
+                role: msg.role,
+                content: msg.content
+            }));
+            
+            // 更新当前会话ID
+            this._currentSessionId = chatId;
+            
+            // 加载消息到内存
+            this._messages = formattedMessages;
+            
+            this._view?.webview.postMessage({ 
+                type: 'chatLoaded', 
+                chatId: chatId,
+                messages: formattedMessages 
+            });
+        } catch (error) {
+            console.error('Failed to load chat:', error);
+        }
+    }
+
+    private async createNewChatSession(title: string): Promise<string> {
+        try {
+            const session = await dbManager.createChatSession(title);
+            this._currentSessionId = session.id;
+            return session.id;
+        } catch (error) {
+            console.error('Failed to create chat session:', error);
+            // 如果数据库失败，使用临时ID
+            this._currentSessionId = Date.now().toString();
+            return this._currentSessionId;
+        }
+    }
+
+    private async saveMessageToDatabase(role: 'user' | 'assistant' | 'system', content: string): Promise<number | null> {
+        try {
+            if (!this._currentSessionId) {
+                console.log('Creating new chat session for message save');
+                this._currentSessionId = await this.createNewChatSession('新对话');
+                console.log('New session created:', this._currentSessionId);
+            }
+
+            console.log(`Saving ${role} message to database:`, {
+                sessionId: this._currentSessionId,
+                contentLength: content.length,
+                contentPreview: content.substring(0, 50) + '...'
+            });
+
+            const messageId = await dbManager.addMessage({
+                session_id: this._currentSessionId,
+                role,
+                content,
+                timestamp: new Date().toISOString()
+            });
+            
+            console.log(`Message saved with ID: ${messageId}`);
+            return messageId;
+        } catch (error) {
+            console.error('Failed to save message to database:', error);
+            return null;
+        }
+    }
+
     private async handleSendMessage(text: string, fileContent?: string, fileName?: string, displayText?: string) {
+        // 防止重复请求
+        if (this._currentController) {
+            log('info', 'ChatViewProvider: 请求正在处理中，忽略新请求');
+            return;
+        }
+
         // 验证文件内容是否有效
         if (fileContent && fileContent.trim().length === 0) {
             log('info', 'ChatViewProvider: 收到空文件内容', { fileName: fileName });
@@ -2147,19 +2434,40 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         
         // 前端显示简洁的提示或原始问题
         const textToDisplay = displayText || originalUserText || `[📄 分析文件: ${fileName}]`;
+        
+        // 保存用户消息到数据库
+        const userMessageId = await this.saveMessageToDatabase('user', textToDisplay);
+        
+        // 创建新的控制器用于这次请求
+        this._currentController = new AbortController();
+        const currentController = this._currentController; // 保存引用
+        
+        // 立即显示用户消息
         this._view?.webview.postMessage({ type: 'appendUser', text: textToDisplay });
         
-        // 调用真实的AI API
-        this._currentController = new AbortController();
         let assistantText = '';
         let gotStreamChunk = false;
         
         try {
-            const response = await callOpenAIChat(this._messages, this._currentController.signal, (chunk) => {
-                gotStreamChunk = true;
-                assistantText += chunk;
-                this._view?.webview.postMessage({ type: 'appendAssistantChunk', text: chunk });
+            log('info', 'ChatViewProvider: 开始AI API调用', { 
+                messagesCount: this._messages.length,
+                hasController: !!currentController
             });
+
+            const response = await callOpenAIChat(this._messages, currentController.signal, (chunk) => {
+                // 确保这是当前请求的响应
+                if (currentController === this._currentController) {
+                    gotStreamChunk = true;
+                    assistantText += chunk;
+                    this._view?.webview.postMessage({ type: 'appendAssistantChunk', text: chunk });
+                }
+            });
+            
+            // 确保这是当前请求的响应
+            if (currentController !== this._currentController) {
+                log('info', 'ChatViewProvider: 请求已被新请求取代，忽略响应');
+                return;
+            }
             
             assistantText = response || assistantText;
             if (assistantText) {
@@ -2170,19 +2478,43 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 this._messages.push({ role: 'assistant', content: assistantText });
                 this._view?.webview.postMessage({ type: 'finalizeAssistant' });
 
+                // 保存助手消息到数据库
+                const assistantMessageId = await this.saveMessageToDatabase('assistant', assistantText);
+
                 // 自动保存生成的代码为文件
                 const language = detectLanguageFromCode(assistantText);
-                await saveCodeToFile(assistantText, language);
+                await saveCodeToFile(assistantText, language, this._currentSessionId || undefined, assistantMessageId || undefined);
+                
+                // 如果是第一条用户消息，更新会话标题
+                try {
+                    const sessionMessages = await dbManager.getMessages(this._currentSessionId!);
+                    const userMessages = sessionMessages.filter(msg => msg.role === 'user');
+                    
+                    if (userMessages.length === 1) { // 第一条用户消息
+                        const title = originalUserText.length > 20 ? originalUserText.substring(0, 20) + '...' : originalUserText;
+                        await dbManager.updateChatSession(this._currentSessionId!, { title });
+                        console.log('Updated chat session title:', title);
+                    }
+                } catch (error) {
+                    console.error('Failed to update chat session title:', error);
+                }
+                
                 log('debug', 'ChatViewProvider: Assistant message generated', { length: assistantText.length });
             }
         } catch (err: any) {
-            if (err?.name !== 'AbortError') {
-                vscode.window.showErrorMessage(`AI Assistant failed: ${err?.message ?? String(err)}`);
-                this._view?.webview.postMessage({ type: 'error', text: String(err?.message ?? err) });
-                log('info', 'ChatViewProvider generation failed', { error: String(err?.message ?? err) });
+            // 确保这是当前请求的错误
+            if (currentController === this._currentController) {
+                if (err?.name !== 'AbortError') {
+                    vscode.window.showErrorMessage(`AI Assistant failed: ${err?.message ?? String(err)}`);
+                    this._view?.webview.postMessage({ type: 'error', text: String(err?.message ?? err) });
+                    log('info', 'ChatViewProvider generation failed', { error: String(err?.message ?? err) });
+                }
             }
         } finally {
-            this._currentController = null;
+            // 只有当前请求才清理控制器
+            if (currentController === this._currentController) {
+                this._currentController = null;
+            }
         }
     }
 
@@ -2230,6 +2562,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
 
     private handleStop() {
         if (this._currentController) {
+            log('info', 'ChatViewProvider: 停止当前请求');
             this._currentController.abort();
             this._currentController = null;
             this._view?.webview.postMessage({ type: 'stopGenerating' });
@@ -2687,9 +3020,14 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     let lastAssistantEl = null;
                     let isGenerating = false;
                     
-                    // 历史记录管理
-                    let chatHistory = JSON.parse(localStorage.getItem('ccdc_chat_history') || '[]');
+                    // 历史记录管理 - 使用数据库而非localStorage
+                    let chatHistory = [];
                     let currentChatId = null;
+                    
+                    // 从数据库加载历史记录
+                    function loadChatHistoryFromDatabase() {
+                        vscode.postMessage({ type: 'loadChatHistory' });
+                    }
                     
                     // DOM 元素
                     const messagesEl = document.getElementById('messages');
@@ -2704,46 +3042,36 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     const sendBtn = document.getElementById('send-btn');
                     const pauseBtn = document.getElementById('pause-btn');
                     
-                    // 历史记录管理函数
-                    function saveChatHistory() {
-                        localStorage.setItem('ccdc_chat_history', JSON.stringify(chatHistory));
-                    }
-
+                    // 页面加载时初始化聊天历史
+                    loadChatHistoryFromDatabase();
+                    
+                    // 历史记录管理函数 - 数据库版本
                     function createNewChat() {
-                        currentChatId = Date.now().toString();
-                        const newChat = {
-                            id: currentChatId,
-                            title: '新对话',
-                            messages: [],
-                            createdAt: new Date().toISOString(),
-                            updatedAt: new Date().toISOString()
-                        };
-                        chatHistory.unshift(newChat);
-                        saveChatHistory();
-                        return newChat;
+                        vscode.postMessage({ type: 'createNewChat' });
                     }
 
                     function updateChatTitle(title) {
                         if (currentChatId) {
-                            const chat = chatHistory.find(c => c.id === currentChatId);
-                            if (chat) {
-                                chat.title = title;
-                                chat.updatedAt = new Date().toISOString();
-                                saveChatHistory();
-                            }
+                            vscode.postMessage({ 
+                                type: 'updateChatTitle', 
+                                chatId: currentChatId, 
+                                title: title 
+                            });
                         }
                     }
 
-                    function addMessageToCurrentChat(role, content) {
-                        if (!currentChatId) {
-                            createNewChat();
-                        }
-                        const chat = chatHistory.find(c => c.id === currentChatId);
-                        if (chat) {
-                            chat.messages.push({ role, content, timestamp: new Date().toISOString() });
-                            chat.updatedAt = new Date().toISOString();
-                            saveChatHistory();
-                        }
+                    function deleteChatFromDatabase(chatId) {
+                        vscode.postMessage({ 
+                            type: 'deleteChat', 
+                            chatId: chatId 
+                        });
+                    }
+
+                    function loadChatFromDatabase(chatId) {
+                        vscode.postMessage({ 
+                            type: 'loadChat', 
+                            chatId: chatId 
+                        });
                     }
 
                     function renderHistoryPanel() {
@@ -2778,30 +3106,17 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     }
 
                     function loadChat(chatId) {
-                        const chat = chatHistory.find(c => c.id === chatId);
-                        if (chat) {
-                            currentChatId = chatId;
-                            messagesEl.innerHTML = '';
-                            chat.messages.forEach(msg => {
-                                addMessage(msg.role, msg.content);
-                            });
-                            messagesEl.scrollTop = messagesEl.scrollHeight;
-                        }
+                        currentChatId = chatId;
+                        loadChatFromDatabase(chatId);
                     }
                     
                     // 删除聊天记录
                     function deleteChat(chatId) {
-                        const index = chatHistory.findIndex(c => c.id === chatId);
-                        if (index !== -1) {
-                            chatHistory.splice(index, 1);
-                            saveChatHistory();
-                            // 如果删除的是当前聊天，清空显示
-                            if (currentChatId === chatId) {
-                                currentChatId = null;
-                                messagesEl.innerHTML = '';
-                            }
-                            // 重新渲染历史面板
-                            renderHistoryPanel();
+                        deleteChatFromDatabase(chatId);
+                        // 如果删除的是当前聊天，清空显示
+                        if (currentChatId === chatId) {
+                            currentChatId = null;
+                            messagesEl.innerHTML = '';
                         }
                     }
                     
@@ -2920,16 +3235,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         
                         // 如果没有当前聊天，创建一个新的
                         if (!currentChatId) {
-                            createNewChat();
-                        }
-                        
-                        // 保存用户消息到历史记录
-                        addMessageToCurrentChat('user', displayText);
-                        
-                        // 更新聊天标题（使用第一条用户消息）
-                        if (chatHistory.find(c => c.id === currentChatId)?.messages.length === 1) {
-                            const title = text.length > 20 ? text.substring(0, 20) + '...' : text;
-                            updateChatTitle(title);
+                            vscode.postMessage({ type: 'createNewChat' });
                         }
                         
                         inputEl.value = '';
@@ -2996,7 +3302,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     if (historyBtn && historyPanel) {
                         historyBtn.addEventListener('click', () => {
                             if (historyPanel.style.display === 'none' || !historyPanel.style.display) {
-                                renderHistoryPanel();
+                                loadChatHistoryFromDatabase();
                                 historyPanel.style.display = 'block';
                             } else {
                                 historyPanel.style.display = 'none';
@@ -3127,10 +3433,6 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 assemblingAssistant = false;
                                 addSaveButtonToLastMessage();
                                 hideLoading(); // 隐藏加载状态
-                                // 保存助手消息到历史记录
-                                if (lastAssistantEl) {
-                                    addMessageToCurrentChat('assistant', lastAssistantEl.textContent || '');
-                                }
                                 break;
                             case 'appendAssistant':
                                 addMessage('assistant', message.text);
@@ -3151,6 +3453,28 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 renderContextTags();
                                 lastAssistantEl = null;
                                 assemblingAssistant = false;
+                                break;
+                            case 'chatHistoryLoaded':
+                                console.log('Received chat history from database:', message.history);
+                                chatHistory = message.history || [];
+                                console.log('Updated chatHistory:', chatHistory);
+                                renderHistoryPanel();
+                                break;
+                            case 'chatCreated':
+                                currentChatId = message.chatId;
+                                break;
+                            case 'chatLoaded':
+                                messagesEl.innerHTML = '';
+                                currentChatId = message.chatId;
+                                message.messages.forEach(msg => {
+                                    addMessage(msg.role, msg.content);
+                                });
+                                messagesEl.scrollTop = messagesEl.scrollHeight;
+                                break;
+                            case 'chatDeleted':
+                                // 从本地历史记录中移除
+                                chatHistory = chatHistory.filter(chat => chat.id !== message.chatId);
+                                renderHistoryPanel();
                                 break;
                         }
                     });

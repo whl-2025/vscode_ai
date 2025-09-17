@@ -27,6 +27,22 @@
       {
         "command": "ccdc.openConfig",
         "title": "Ccdc: Open Configuration"
+      },
+      {
+        "command": "ccdc.exportHistory",
+        "title": "Ccdc: Export Chat History"
+      },
+      {
+        "command": "ccdc.importHistory",
+        "title": "Ccdc: Import Chat History"
+      },
+      {
+        "command": "ccdc.clearHistory",
+        "title": "Ccdc: Clear Chat History"
+      },
+      {
+        "command": "ccdc.showStats",
+        "title": "Ccdc: Show Statistics"
       }
     ],
     "viewsContainers": {
@@ -107,6 +123,27 @@
           "default": "info",
           "enum": ["none", "info", "debug"],
           "description": "The logging level for the extension."
+        },
+        "ccdcCodeGen.useDatabase": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use database to store chat history (otherwise use localStorage)"
+        },
+        "ccdcCodeGen.maxHistoryDays": {
+          "type": "number",
+          "default": 30,
+          "description": "Number of days to keep chat history (0 for unlimited)"
+        },
+        "ccdcCodeGen.autoSaveGenerated": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save generated code to generated/ folder"
+        },
+        "ccdcCodeGen.storageStrategy": {
+          "type": "string",
+          "enum": ["workspace", "global"],
+          "default": "workspace",
+          "description": "Storage strategy: 'workspace' for per-project storage, 'global' for cross-project storage"
         }
       }
     }
