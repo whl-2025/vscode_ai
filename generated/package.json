@@ -1,0 +1,123 @@
+{
+  "name": "gpt-ccdc",
+  "displayName": "GPT.CCDC",
+  "description": "GPT tool inside VS Code.",
+  "version": "0.0.1",
+  "publisher": "ccdc-lab",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [     
+      {
+        "command": "ccdc.openChat",
+        "title": "Ccdc: Open Chat"
+      },
+      {
+        "command": "ccdc.generateCode",
+        "title": "Ccdc: Generate Code"
+      },
+      {
+        "command": "ccdc.openConfig",
+        "title": "Ccdc: Open Configuration"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ccdc_chat",
+          "title": "CCDC",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ccdc_chat": [
+        {
+          "type": "webview",
+          "id": "ccdc.chatView",
+          "name": "Chat",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "ccdc.chatView",
+        "contents": "Welcome to gpt.ccdc Chat!"
+      }
+    ],
+    "configuration": {
+      "title": "AI Code Generation",
+      "properties": {
+        "ccdcCodeGen.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API key used for Authorization header (Bearer). Leave empty if your server doesn't require it.",
+          "markdownDescription": "Optional API key used for Authorization header (Bearer). Leave empty if your server doesn't require it."
+        },
+        "ccdcCodeGen.baseUrl": {
+          "type": "string",
+          "default": "https://gpt.ccdc.com.cn",
+          "description": "The base URL for the AI service."
+        },
+        "ccdcCodeGen.model": {
+          "type": "string",
+          "default": "gpt-3.5-turbo",
+          "description": "The model to use for code generation."
+        },
+        "ccdcCodeGen.temperature": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The sampling temperature."
+        },
+        "ccdcCodeGen.maxTokens": {
+          "type": "integer",
+          "default": 2048,
+          "minimum": 1,
+          "description": "The maximum number of tokens to generate in the completion."
+        },
+        "ccdcCodeGen.systemPrompt": {
+          "type": "string",
+          "default": "你是一个专业的代码分析助手。请用中文分析用户提供的文件内容。不要重复同一个词语或句子。提供简洁、清晰的分析。",
+          "description": "The system prompt to use for the AI model."
+        },
+        "ccdcCodeGen.stream": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether to stream the response."
+        },
+        "ccdcCodeGen.timeoutMs": {
+          "type": "integer",
+          "default": 120000,
+          "minimum": 1000,
+          "description": "The timeout for the AI request in milliseconds."
+        },
+        "ccdcCodeGen.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": ["none", "info", "debug"],
+          "description": "The logging level for the extension."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

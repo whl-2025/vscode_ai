@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <!-- 背景圆形 -->
+  <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.1"/>
+  <!-- CCDC文字 -->
+  <text x="12" y="14" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" font-weight="bold" fill="currentColor">CCDC</text>
+</svg>
+

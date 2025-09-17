@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Build outputs
+*.tsbuildinfo
+
+# Development files
+.vscode/
+.git/
+.gitignore
+README.md
+CHANGELOG.md
+
+# Source maps (optional, can be included for debugging)
+*.js.map
+
+# Test files
+test/
+tests/
+*.test.js
+*.test.ts
+
+# Documentation
+docs/
+*.md
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
