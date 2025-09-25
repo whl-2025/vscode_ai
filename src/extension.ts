@@ -369,6 +369,7 @@ ${Object.entries(stats.languageStats).map(([lang, count]) => `• ${lang}: ${cou
         }
     });
     context.subscriptions.push(showStatsCommand);
+
 }
 
 export function deactivate() {
@@ -932,8 +933,8 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
 
     const fileUri = vscode.Uri.file(path.join(generatedFolderPath, fileName));
 
-    // 直接保存原始AI回复内容，不进行代码清理
-    const finalCode = code;
+    // 在保存前清理代码块标识符和中文解释
+    const finalCode = cleanCodeBlockMarkers(code);
 
     // 写入文件
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(finalCode, 'utf8'));
@@ -982,6 +983,202 @@ async function fileExists(filePath: string): Promise<boolean> {
         return false;
     }
 }
+
+/**
+ * 清理代码块标识符和中文解释文字
+ * @param content 文件内容
+ * @returns 清理后的内容
+ */
+function cleanCodeBlockMarkers(content: string): string {
+    if (!content || typeof content !== 'string') {
+        return content;
+    }
+
+    const lines = content.split('\n');
+    const cleanedLines: string[] = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+        
+        // 跳过代码块开始和结束标记
+        if (trimmedLine.startsWith('```') && trimmedLine.length <= 20) {
+            // 这是代码块标记，跳过这一行
+            continue;
+        }
+        
+        // 跳过纯中文解释行（不包含代码特征的行）
+        if (isChineseExplanationLine(trimmedLine)) {
+            continue;
+        }
+        
+        // 跳过包含中文的打印输出代码行
+        if (isChinesePrintLine(trimmedLine)) {
+            continue;
+        }
+        
+        // 跳过行内中文注释（保留代码，删除中文注释部分）
+        const cleanedLine = removeChineseComments(line);
+        if (cleanedLine.trim()) {
+            cleanedLines.push(cleanedLine);
+        }
+    }
+    
+    // 删除代码块外的最后一行内容（如果它是解释文字）
+    const finalCleanedLines = removeLastExplanationLine(cleanedLines);
+    
+    return finalCleanedLines.join('\n');
+}
+
+/**
+ * 判断是否为纯中文解释行
+ * @param line 文本行
+ * @returns 是否为纯中文解释行
+ */
+function isChineseExplanationLine(line: string): boolean {
+    if (!line) return false;
+    
+    // 检查是否包含中文
+    const hasChinese = /[\u4e00-\u9fa5]/.test(line);
+    if (!hasChinese) return false;
+    
+    // 检查是否包含代码特征
+    const hasCodeFeatures = /[a-zA-Z_][a-zA-Z0-9_]*\s*[=:\(\)\[\]{};]/.test(line) || 
+                           /^(def|class|import|from|if|elif|else|for|while|try|except|finally|with|as|return|yield|lambda)\s/.test(line) ||
+                           /^\s*#/.test(line) ||
+                           /^\s*\/\//.test(line) ||
+                           /^\s*\/\*/.test(line) ||
+                           /^\s*\*/.test(line) ||
+                           /^\s*[{}();]/.test(line);
+    
+    // 如果包含中文但不包含代码特征，则认为是解释行
+    return !hasCodeFeatures;
+}
+
+/**
+ * 判断是否为解释文字行（中文或英文）
+ * @param line 文本行
+ * @returns 是否为解释文字行
+ */
+function isExplanationLine(line: string): boolean {
+    if (!line) return false;
+    
+    // 检查是否包含代码特征
+    const hasCodeFeatures = /[a-zA-Z_][a-zA-Z0-9_]*\s*[=:\(\)\[\]{};]/.test(line) || 
+                           /^(def|class|import|from|if|elif|else|for|while|try|except|finally|with|as|return|yield|lambda)\s/.test(line) ||
+                           /^\s*#/.test(line) ||
+                           /^\s*\/\//.test(line) ||
+                           /^\s*\/\*/.test(line) ||
+                           /^\s*\*/.test(line) ||
+                           /^\s*[{}();]/.test(line) ||
+                           /^<[a-zA-Z]/.test(line) ||  // HTML标签
+                           /^<\/[a-zA-Z]/.test(line) ||  // HTML结束标签
+                           /^export\s/.test(line) ||  // ES6 export
+                           /^import\s/.test(line);  // ES6 import
+    
+    // 如果不包含代码特征，则认为是解释行
+    return !hasCodeFeatures;
+}
+
+/**
+ * 判断是否为包含中文的打印输出代码行
+ * @param line 文本行
+ * @returns 是否为包含中文的打印输出代码行
+ */
+function isChinesePrintLine(line: string): boolean {
+    if (!line) return false;
+    
+    // 检查是否包含中文
+    const hasChinese = /[\u4e00-\u9fa5]/.test(line);
+    if (!hasChinese) return false;
+    
+    // 检查是否为打印输出相关的代码行
+    const isPrintLine = /print\s*\(/.test(line) || 
+                       /console\.log\s*\(/.test(line) ||
+                       /console\.warn\s*\(/.test(line) ||
+                       /console\.error\s*\(/.test(line) ||
+                       /System\.out\.print/.test(line) ||
+                       /printf\s*\(/.test(line) ||
+                       /echo\s/.test(line) ||
+                       /puts\s/.test(line) ||
+                       /print\s/.test(line) ||
+                       /你可以使用以下代码测试/.test(line) ||
+                       /这将输出/.test(line) ||
+                       /测试这个函数/.test(line);
+    
+    return isPrintLine;
+}
+
+/**
+ * 删除行内的中文注释
+ * @param line 文本行
+ * @returns 清理后的行
+ */
+function removeChineseComments(line: string): string {
+    if (!line) return line;
+    
+    // 处理Python注释
+    if (line.includes('#')) {
+        const parts = line.split('#');
+        if (parts.length > 1) {
+            const codePart = parts[0];
+            const commentPart = parts.slice(1).join('#');
+            
+            // 如果注释部分主要是中文，则删除注释
+            if (/[\u4e00-\u9fa5]/.test(commentPart) && !/[a-zA-Z_][a-zA-Z0-9_]*\s*[=:\(\)\[\]{};]/.test(commentPart)) {
+                return codePart.trim();
+            }
+        }
+    }
+    
+    // 处理JavaScript/TypeScript注释
+    if (line.includes('//')) {
+        const parts = line.split('//');
+        if (parts.length > 1) {
+            const codePart = parts[0];
+            const commentPart = parts.slice(1).join('//');
+            
+            // 如果注释部分主要是中文，则删除注释
+            if (/[\u4e00-\u9fa5]/.test(commentPart) && !/[a-zA-Z_][a-zA-Z0-9_]*\s*[=:\(\)\[\]{};]/.test(commentPart)) {
+                return codePart.trim();
+            }
+        }
+    }
+    
+    return line;
+}
+
+/**
+ * 删除代码块外的最后一行解释内容
+ * @param lines 已清理的行数组
+ * @returns 进一步清理后的行数组
+ */
+function removeLastExplanationLine(lines: string[]): string[] {
+    if (lines.length === 0) return lines;
+    
+    // 从最后一行开始检查
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+        
+        // 如果遇到空行，跳过
+        if (!trimmedLine) {
+            continue;
+        }
+        
+        // 如果最后一行是解释文字（中文或英文），删除它
+        if (isExplanationLine(trimmedLine) || isChinesePrintLine(trimmedLine)) {
+            lines.splice(i, 1);
+            continue;
+        }
+        
+        // 如果遇到代码行，停止删除
+        break;
+    }
+    
+    return lines;
+}
+
 
 
 class ChatPanel {

@@ -1,4 +1,3 @@
-```python
 import numpy as np
 
 def bubble_sort(arr):
@@ -23,4 +22,3 @@ def bubble_sort(arr):
 arr = [5, 2, 1, 4, 3, 6]
 sorted_arr = bubble_sort(arr)
 print(sorted_arr)
-```
