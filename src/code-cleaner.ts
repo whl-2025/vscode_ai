@@ -104,6 +104,10 @@ const COMMENT_RULES: { [key: string]: { single: string; multi: { start: string; 
         single: '// ',
         multi: { start: '/*', end: '*/' }
     },
+    'vue': {
+        single: '<!-- ',
+        multi: { start: '<!--', end: '-->' }
+    },
     'plaintext': {
         single: '# ',
         multi: { start: '#', end: '#' }

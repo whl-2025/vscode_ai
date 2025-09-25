@@ -3,8 +3,9 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { detectLanguageFromCode, getFileExtension } from './language-detection';
-import { cleanAICodeResponse, extractPureCode } from './code-cleaner';
+// 移除代码清理导入，现在直接保存原始内容
 import { DatabaseManager, ChatSession, ChatMessage as DBChatMessage, GeneratedFile } from './database-manager';
+import { PromptManager } from './prompts/prompt-manager';
 import * as path from 'path';
 
 type OpenAIResponse = {
@@ -69,13 +70,17 @@ function log(level: LogLevel, message: string, details?: unknown) {
 
 function getConfiguration() {
     const config = vscode.workspace.getConfiguration('ccdcCodeGen');
+    const promptManager = PromptManager.getInstance();
+    const promptConfig = PromptManager.createConfigFromVSCode();
+    
     return {
         baseUrl: config.get<string>('baseUrl', 'https://gpt.ccdc.com.cn'),
         apiKey: config.get<string>('apiKey', ''),
         model: config.get<string>('model', 'gpt-3.5-turbo'),
         temperature: config.get<number>('temperature', 0.1),
         maxTokens: config.get<number>('maxTokens', 2048),
-        systemPrompt: config.get<string>('systemPrompt', '你是一个专业的代码分析助手。请用中文详细分析用户提供的文件内容。当看到文件内容时，请直接分析其结构、功能和作用，不要重复文件内容本身。对于Vue文件，分析组件结构和功能；对于JSON文件，分析配置项的作用。'),
+        systemPrompt: config.get<string>('systemPrompt', ''), // 原始的自定义系统提示词
+        builtSystemPrompt: promptManager.buildSystemPrompt(promptConfig), // 构建后的完整系统提示词
         stream: config.get<boolean>('stream', false),
         timeoutMs: config.get<number>('timeoutMs', 120000),
         logLevel: (config.get<string>('logLevel', 'info') as LogLevel) || 'info',
@@ -83,6 +88,12 @@ function getConfiguration() {
         maxHistoryDays: config.get<number>('maxHistoryDays', 30),
         autoSaveGenerated: config.get<boolean>('autoSaveGenerated', true),
         storageStrategy: (config.get<string>('storageStrategy', 'workspace') as 'workspace' | 'global') || 'workspace',
+        // 新增的提示词相关配置
+        promptMode: promptConfig.promptMode,
+        enableToolInstructions: promptConfig.enableToolInstructions,
+        enableCodingBestPractices: promptConfig.enableCodingBestPractices,
+        enableChineseInstructions: promptConfig.enableChineseInstructions,
+        fastMode: promptConfig.fastMode,
     };
 }
 
@@ -99,7 +110,7 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
     const url = new URL('/v1/chat/completions', cfg.baseUrl);
 
     const messages = [
-        { role: 'system', content: cfg.systemPrompt },
+        { role: 'system', content: cfg.builtSystemPrompt },
         { role: 'user', content: prompt }
     ];
 
@@ -406,6 +417,11 @@ class ConfigurationPanel {
                     await config.update('model', msg.config.model, vscode.ConfigurationTarget.Global);
                     await config.update('temperature', msg.config.temperature, vscode.ConfigurationTarget.Global);
                     await config.update('maxTokens', msg.config.maxTokens, vscode.ConfigurationTarget.Global);
+                    await config.update('promptMode', msg.config.promptMode, vscode.ConfigurationTarget.Global);
+                    await config.update('enableToolInstructions', msg.config.enableToolInstructions, vscode.ConfigurationTarget.Global);
+                    await config.update('enableCodingBestPractices', msg.config.enableCodingBestPractices, vscode.ConfigurationTarget.Global);
+                    await config.update('enableChineseInstructions', msg.config.enableChineseInstructions, vscode.ConfigurationTarget.Global);
+                    await config.update('fastMode', msg.config.fastMode, vscode.ConfigurationTarget.Global);
                     await config.update('systemPrompt', msg.config.systemPrompt, vscode.ConfigurationTarget.Global);
                     await config.update('stream', msg.config.stream, vscode.ConfigurationTarget.Global);
                     await config.update('timeoutMs', msg.config.timeoutMs, vscode.ConfigurationTarget.Global);
@@ -453,8 +469,23 @@ class ConfigurationPanel {
         const script = `
             const vscode = acquireVsCodeApi();
             
-            // 加载当前配置
-            const config = ${JSON.stringify(cfg)};
+            // 加载当前配置（只传递UI需要的配置项，避免长文本溢出）
+            const config = ${JSON.stringify({
+                baseUrl: cfg.baseUrl,
+                apiKey: cfg.apiKey,
+                model: cfg.model,
+                temperature: cfg.temperature,
+                maxTokens: cfg.maxTokens,
+                promptMode: cfg.promptMode,
+                enableToolInstructions: cfg.enableToolInstructions,
+                enableCodingBestPractices: cfg.enableCodingBestPractices,
+                enableChineseInstructions: cfg.enableChineseInstructions,
+                fastMode: cfg.fastMode,
+                systemPrompt: cfg.systemPrompt,
+                stream: cfg.stream,
+                timeoutMs: cfg.timeoutMs,
+                logLevel: cfg.logLevel
+            })};
             
             // 填充表单
             document.getElementById('baseUrl').value = config.baseUrl;
@@ -462,7 +493,12 @@ class ConfigurationPanel {
             document.getElementById('model').value = config.model;
             document.getElementById('temperature').value = config.temperature;
             document.getElementById('maxTokens').value = config.maxTokens;
-            document.getElementById('systemPrompt').value = config.systemPrompt;
+            document.getElementById('promptMode').value = config.promptMode || 'enhanced';
+            document.getElementById('enableToolInstructions').checked = config.enableToolInstructions !== false;
+            document.getElementById('enableCodingBestPractices').checked = config.enableCodingBestPractices !== false;
+            document.getElementById('enableChineseInstructions').checked = config.enableChineseInstructions !== false;
+            document.getElementById('fastMode').checked = config.fastMode || false;
+            document.getElementById('systemPrompt').value = config.systemPrompt || '';
             document.getElementById('stream').checked = config.stream;
             document.getElementById('timeoutMs').value = config.timeoutMs;
             document.getElementById('logLevel').value = config.logLevel;
@@ -474,6 +510,11 @@ class ConfigurationPanel {
                     model: document.getElementById('model').value,
                     temperature: parseFloat(document.getElementById('temperature').value),
                     maxTokens: parseInt(document.getElementById('maxTokens').value),
+                    promptMode: document.getElementById('promptMode').value,
+                    enableToolInstructions: document.getElementById('enableToolInstructions').checked,
+                    enableCodingBestPractices: document.getElementById('enableCodingBestPractices').checked,
+                    enableChineseInstructions: document.getElementById('enableChineseInstructions').checked,
+                    fastMode: document.getElementById('fastMode').checked,
                     systemPrompt: document.getElementById('systemPrompt').value,
                     stream: document.getElementById('stream').checked,
                     timeoutMs: parseInt(document.getElementById('timeoutMs').value),
@@ -489,7 +530,12 @@ class ConfigurationPanel {
                 document.getElementById('model').value = config.model;
                 document.getElementById('temperature').value = config.temperature;
                 document.getElementById('maxTokens').value = config.maxTokens;
-                document.getElementById('systemPrompt').value = config.systemPrompt;
+                document.getElementById('promptMode').value = config.promptMode || 'enhanced';
+                document.getElementById('enableToolInstructions').checked = config.enableToolInstructions !== false;
+                document.getElementById('enableCodingBestPractices').checked = config.enableCodingBestPractices !== false;
+                document.getElementById('enableChineseInstructions').checked = config.enableChineseInstructions !== false;
+                document.getElementById('fastMode').checked = config.fastMode || false;
+                document.getElementById('systemPrompt').value = config.systemPrompt || '';
                 document.getElementById('stream').checked = config.stream;
                 document.getElementById('timeoutMs').value = config.timeoutMs;
                 document.getElementById('logLevel').value = config.logLevel;
@@ -553,8 +599,46 @@ class ConfigurationPanel {
                     </div>
                     
                     <div class="form-group">
-                        <label for="systemPrompt">System Prompt:</label>
-                        <textarea id="systemPrompt" placeholder="You are a helpful coding assistant..."></textarea>
+                        <label for="promptMode">提示词模式:</label>
+                        <select id="promptMode">
+                            <option value="basic">基础模式</option>
+                            <option value="enhanced">增强模式</option>
+                        </select>
+                        <small>选择AI助手的行为模式</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="enableToolInstructions"> 启用工具使用指导
+                        </label>
+                        <small>为AI提供详细的工具使用规范</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="enableCodingBestPractices"> 启用编程最佳实践
+                        </label>
+                        <small>为AI提供代码编辑和文件操作的最佳实践指导</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="enableChineseInstructions"> 启用中文特色指导
+                        </label>
+                        <small>保持原有的中文代码分析特色</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="fastMode"> 🚀 快速模式
+                        </label>
+                        <small>启用后将使用精简的系统提示词，显著提高响应速度</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="systemPrompt">自定义系统提示词 (可选):</label>
+                        <textarea id="systemPrompt" placeholder="在这里添加您的自定义指令，将追加到自动生成的提示词后面..."></textarea>
+                        <small>此内容将追加到根据上述配置自动生成的系统提示词后面</small>
                     </div>
                     
                     <div class="form-group">
@@ -681,12 +765,140 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     });
 }
 
+/**
+ * 判断内容是否可能是普通文本（而不是代码）
+ * @param text 要判断的文本
+ * @returns 是否为普通文本
+ */
+function isLikelyPlainText(text: string): boolean {
+    if (!text || text.length === 0) return true;
+    
+    const trimmed = text.trim();
+    
+    // 首先检查是否包含明显的代码结构，如果有则不是普通文本
+    const hasCodeStructures = [
+        /<template>/i,           // Vue template
+        /<script>/i,             // Vue/HTML script
+        /<style>/i,              // Vue/HTML style
+        /<\w+[^>]*>/,           // HTML/XML tags
+        /```\w+/,               // Code blocks
+        /function\s+\w+\s*\(/,  // Function definitions
+        /class\s+\w+/,          // Class definitions
+        /import\s+.*from/,      // Import statements
+        /export\s+(default\s+)?/, // Export statements
+        /const\s+\w+\s*=/,      // Const declarations
+        /let\s+\w+\s*=/,        // Let declarations
+        /var\s+\w+\s*=/,        // Var declarations
+        /def\s+\w+\s*\(/,       // Python function definitions
+        /\w+\s*:\s*\w+/,        // Type annotations or object properties
+    ];
+    
+    // 如果包含任何代码结构，不是普通文本
+    if (hasCodeStructures.some(pattern => pattern.test(trimmed))) {
+        return false;
+    }
+    
+    // 只有在内容很短且符合特定模式时才判断为普通文本
+    if (trimmed.length < 50) {
+        const simpleTextPatterns = [
+            /^(Hello|Hi|I am|我是|你好|好的|是的|不是|谢谢|Thank you|ready)[.,!?。，！？]*$/i,
+            /^[A-Za-z\s\u4e00-\u9fff.,!?。，！？]{1,50}$/,  // 很短的纯文本
+            /助手|assistant|AI.*[.,!?。，！？]*$/i
+        ];
+        
+        return simpleTextPatterns.some(pattern => pattern.test(trimmed));
+    }
+    
+    return false;
+}
+
+/**
+ * 强制检测是否为Vue内容
+ * @param text 要检测的文本
+ * @returns 是否为Vue内容
+ */
+function isDefinitelyVueContent(text: string): boolean {
+    if (!text) return false;
+    
+    const trimmed = text.trim();
+    
+    // Vue组件的强特征
+    const hasTemplate = /<template[^>]*>/.test(trimmed);
+    const hasScript = /<script[^>]*>/.test(trimmed);
+    const hasStyle = /<style[^>]*>/.test(trimmed);
+    const hasVueDirectives = /v-\w+|@\w+|:\w+/.test(trimmed);
+    const hasVueInterpolation = /\{\{.*\}\}/.test(trimmed);
+    const hasExportDefault = /export\s+default/.test(trimmed);
+    
+    // 如果同时包含template和script，几乎肯定是Vue
+    if (hasTemplate && hasScript) {
+        return true;
+    }
+    
+    // 如果包含template和Vue指令，很可能是Vue
+    if (hasTemplate && hasVueDirectives) {
+        return true;
+    }
+    
+    // 如果包含Vue模板语法
+    if (hasTemplate && hasVueInterpolation) {
+        return true;
+    }
+    
+    // 如果包含template、script或style中的至少两个
+    const vueStructureCount = [hasTemplate, hasScript, hasStyle].filter(Boolean).length;
+    if (vueStructureCount >= 2) {
+        return true;
+    }
+    
+    return false;
+}
+
+/**
+ * 计算文本中自然语言的比例
+ * @param text 要分析的文本
+ * @returns 自然语言比例 (0-1)
+ */
+function calculateNaturalLanguageRatio(text: string): number {
+    const totalChars = text.length;
+    if (totalChars === 0) return 0;
+    
+    // 计算自然语言字符的数量（字母、中文、空格、标点）
+    const naturalLanguageChars = (text.match(/[a-zA-Z\u4e00-\u9fff\s.,!?。，！？]/g) || []).length;
+    
+    return naturalLanguageChars / totalChars;
+}
+
 async function saveCodeToFile(code: string, language: string, sessionId?: string, messageId?: number): Promise<string> {
     let baseFileName = 'generated';
     let fileExtension = '';
 
-    // 根据语言确定文件扩展名
-    fileExtension = getFileExtension(language);
+    // 智能判断内容类型，避免误判
+    const trimmedCode = code.trim();
+    const isPlainText = isLikelyPlainText(trimmedCode);
+    
+    // 特殊处理：强制Vue检测
+    const isVueContent = isDefinitelyVueContent(trimmedCode);
+    
+    if (isVueContent) {
+        // 强制识别为Vue文件
+        fileExtension = '.vue';
+        language = 'vue';
+        log('info', '强制识别为Vue内容，使用 .vue 扩展名', { 
+            originalLanguage: language,
+            contentPreview: trimmedCode.substring(0, 50) 
+        });
+    } else if (isPlainText) {
+        // 如果内容明显是普通文本，强制使用 .txt 扩展名
+        fileExtension = '.txt';
+        log('info', '检测到普通文本内容，使用 .txt 扩展名', { 
+            detectedLanguage: language, 
+            contentPreview: trimmedCode.substring(0, 50) 
+        });
+    } else {
+        // 根据语言确定文件扩展名
+        fileExtension = getFileExtension(language);
+    }
 
     let fileName = baseFileName + fileExtension;
     let counter = 1;
@@ -720,9 +932,8 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
 
     const fileUri = vscode.Uri.file(path.join(generatedFolderPath, fileName));
 
-    // 清理代码，将非代码部分注释掉
-    const cleanedCode = cleanAICodeResponse(code, language);
-    const finalCode = cleanedCode.cleanedCode;
+    // 直接保存原始AI回复内容，不进行代码清理
+    const finalCode = code;
 
     // 写入文件
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(finalCode, 'utf8'));
@@ -756,10 +967,7 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
     }
     
     // 显示保存信息
-    const message = cleanedCode.hasCodeBlocks 
-        ? `代码已保存到: generated/${fileName} (包含 ${cleanedCode.codeBlocks.length} 个代码块)`
-        : `代码已保存到: generated/${fileName} (已清理注释)`;
-    
+    const message = `内容已保存到: generated/${fileName} (${language.toUpperCase()})`;
     vscode.window.showInformationMessage(message);
     
     return fileUri.fsPath;
@@ -895,7 +1103,7 @@ class ChatPanel {
                     msg.fileName = '未知文件';
                 }
                 
-                const system = cfg.systemPrompt?.trim();
+                const system = cfg.builtSystemPrompt?.trim();
                 
                 // 调试：检查接收到的消息内容
                 log('debug', '收到send消息', {
@@ -2526,10 +2734,9 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         if (!text?.trim()) return;
         
         try {
-            // 检测语言并清理代码
+            // 检测语言但不清理代码，保留原始内容
             const detectedLanguage = detectLanguageFromCode(text);
-            const cleanedCode = cleanAICodeResponse(text, detectedLanguage);
-            const finalCode = cleanedCode.cleanedCode;
+            const finalCode = text;
             
             // 根据检测到的语言确定默认文件名和扩展名
             const fileExtension = getFileExtension(detectedLanguage);
@@ -2549,9 +2756,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             if (uri) {
                 await vscode.workspace.fs.writeFile(uri, Buffer.from(finalCode, 'utf8'));
                 
-                const message = cleanedCode.hasCodeBlocks 
-                    ? `文件已保存到: ${uri.fsPath} (包含 ${cleanedCode.codeBlocks.length} 个代码块)`
-                    : `文件已保存到: ${uri.fsPath} (已清理注释)`;
+                const message = `文件已保存到: ${uri.fsPath} (${detectedLanguage.toUpperCase()})`;
                 
                 vscode.window.showInformationMessage(message);
             }
@@ -2715,7 +2920,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 .messages {
                     flex: 1;
                     overflow-y: auto;
-                    margin-bottom: 10px;
+                    margin-bottom: 80px;
                     padding: 4px;
                 }
                 .message {

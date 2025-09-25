@@ -8,7 +8,32 @@ export function detectLanguageFromCode(code: string): string {
     
     // 语言检测规则，按优先级排序
     const languagePatterns = [
-        // Python 检测 - 提高优先级
+        // Vue 检测 - 最高优先级（避免与HTML混淆）
+        {
+            language: 'vue',
+            patterns: [
+                /<template/,
+                /<script/,
+                /<style/,
+                /export\s+default/,
+                /v-if/,
+                /v-for/,
+                /v-model/,
+                /@click/,
+                /@input/,
+                /:class/,
+                /:style/,
+                /{{.*}}/,
+                /v-bind/,
+                /v-on/,
+                /:key/,
+                /scoped/,
+                /setup\(\)/
+            ],
+            keywords: ['<template', '<script', '<style', 'v-if', 'v-for', 'v-model', '@click', ':class', 'export default']
+        },
+        
+        // Python 检测
         {
             language: 'python',
             patterns: [
@@ -110,32 +135,6 @@ export function detectLanguageFromCode(code: string): string {
             keywords: ['interface ', 'type ', 'enum ', 'public ', 'private ', 'protected ', 'readonly ', 'as ']
         },
         
-        // Vue 检测
-        {
-            language: 'vue',
-            patterns: [
-                /<template/,
-                /<script/,
-                /<style/,
-                /export\s+default/,
-                /<div/,
-                /<span/,
-                /<button/,
-                /<input/,
-                /<form/,
-                /v-if/,
-                /v-for/,
-                /v-model/,
-                /@click/,
-                /@input/,
-                /:class/,
-                /:style/,
-                /computed:/,
-                /methods:/,
-                /data\s*\(\s*\)\s*{/
-            ],
-            keywords: ['<template', '<script', '<style', 'export default', 'v-if', 'v-for', 'v-model', '@click']
-        },
         
         // React 检测
         {
@@ -192,25 +191,25 @@ export function detectLanguageFromCode(code: string): string {
         {
             language: 'css',
             patterns: [
-                /\.\w+\s*{/,
-                /#\w+\s*{/,
+                /\.\w+\s*\{/,
+                /#\w+\s*\{/,
                 /@media/,
                 /@keyframes/,
                 /@import/,
-                /:\w+/,
+                /[\w-]+\s*:\s*[\w\-#%.()]+\s*;/,  // 更精确的CSS属性匹配
                 /::\w+/,
-                /margin:/,
-                /padding:/,
-                /color:/,
-                /background:/,
-                /font-/,
-                /border:/,
-                /width:/,
-                /height:/,
-                /display:/,
-                /position:/
+                /margin\s*:/,
+                /padding\s*:/,
+                /color\s*:/,
+                /background\s*:/,
+                /font-\w+\s*:/,
+                /border\s*:/,
+                /width\s*:/,
+                /height\s*:/,
+                /display\s*:/,
+                /position\s*:/
             ],
-            keywords: ['.', '#', '@media', '@keyframes', 'margin:', 'padding:', 'color:', 'background:']
+            keywords: ['@media', '@keyframes', '@import', 'margin:', 'padding:', 'color:', 'background:', 'font-']
         },
         
         // SQL 检测
@@ -424,7 +423,7 @@ export function detectLanguageFromCode(code: string): string {
                 /case\s+\w+\s+in/,
                 /esac\s*$/,
                 /\$\w+/,
-                /export\s+\w+/,
+                /export\s+[A-Z_][A-Z0-9_]*=/,  // 修复：只匹配shell环境变量格式 export VAR=value
                 /source\s+/,
                 /\.\s+\w+/
             ],
@@ -548,6 +547,19 @@ export function detectLanguageFromCode(code: string): string {
         for (const keyword of lang.keywords) {
             const keywordCount = (trimmedCode.match(new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')) || []).length;
             score += keywordCount;
+        }
+        
+        // Vue特殊加权：如果同时包含template、script、style，大幅加分
+        if (lang.language === 'vue') {
+            const hasTemplate = /<template/.test(trimmedCode);
+            const hasScript = /<script/.test(trimmedCode);
+            const hasStyle = /<style/.test(trimmedCode);
+            const hasVueDirectives = /v-\w+|@\w+|:\w+/.test(trimmedCode);
+            
+            if (hasTemplate && hasScript) score += 10;  // Vue组件的强特征
+            if (hasTemplate && hasStyle) score += 8;   // Vue单文件组件
+            if (hasVueDirectives) score += 5;          // Vue指令
+            if (hasTemplate || hasScript || hasStyle) score += 3; // 基础Vue特征
         }
         
         // 检查第一行特殊模式（如shebang）
