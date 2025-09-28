@@ -104,10 +104,12 @@ export class PromptManager {
 - 最后一个字符：</style>
 - 中间：标准Vue组件代码
 - 禁止：任何解释、标记、说明
+- 【重要】所有注释必须使用中文
 
 Vue标准：
 <template>
   <div class="component">
+    <!-- 显示标题 -->
     <h1>{{ title }}</h1>
   </div>
 </template>
@@ -123,6 +125,7 @@ export default {
 </script>
 
 <style scoped>
+/* 组件样式 */
 .component {
   padding: 10px;
 }

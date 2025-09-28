@@ -118,13 +118,27 @@ const COMMENT_RULES: { [key: string]: { single: string; multi: { start: string; 
  * 清理AI回答，将非代码部分注释掉
  * @param text AI回答的原始文本
  * @param detectedLanguage 检测到的编程语言
+ * @param removeChineseComments 是否删除中文注释（默认false）
+ * @param extractPureCodeOnly 是否只提取纯净代码，删除所有注释和解释（默认false）
  * @returns 清理后的代码
  */
-export function cleanAICodeResponse(text: string, detectedLanguage: string): CleanedCode {
+export function cleanAICodeResponse(text: string, detectedLanguage: string, removeChineseComments: boolean = false, extractPureCodeOnly: boolean = false): CleanedCode {
     if (!text || typeof text !== 'string') {
         return {
             originalText: text,
             cleanedCode: text,
+            language: detectedLanguage,
+            hasCodeBlocks: false,
+            codeBlocks: []
+        };
+    }
+
+    // 如果启用纯净代码提取模式，直接提取代码
+    if (extractPureCodeOnly) {
+        const pureCode = extractPureCodeFromText(text, detectedLanguage);
+        return {
+            originalText: text,
+            cleanedCode: pureCode,
             language: detectedLanguage,
             hasCodeBlocks: false,
             codeBlocks: []
@@ -148,6 +162,11 @@ export function cleanAICodeResponse(text: string, detectedLanguage: string): Cle
         if (!trimmedLine) {
             cleanedLines.push(line);
             continue;
+        }
+
+        // 如果启用删除中文注释功能，检查并删除中文注释
+        if (removeChineseComments && isChineseComment(trimmedLine, detectedLanguage)) {
+            continue; // 跳过中文注释行
         }
 
         // 检查是否为代码块标记
@@ -203,6 +222,277 @@ export function cleanAICodeResponse(text: string, detectedLanguage: string): Cle
         hasCodeBlocks: false,
         codeBlocks: []
     };
+}
+
+/**
+ * 从文本中提取纯净的代码，删除所有注释和解释文字
+ * @param text 原始文本
+ * @param language 编程语言
+ * @returns 纯净的代码
+ */
+function extractPureCodeFromText(text: string, language: string): string {
+    const lines = text.split('\n');
+    const codeLines: string[] = [];
+    
+    // 跟踪是否在代码块中
+    let inCodeBlock = false;
+    let codeBlockLanguage = '';
+    
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+        
+        // 检查代码块标记
+        if (trimmedLine.startsWith('```')) {
+            if (!inCodeBlock) {
+                // 开始代码块
+                inCodeBlock = true;
+                codeBlockLanguage = trimmedLine.substring(3).trim();
+                continue;
+            } else {
+                // 结束代码块
+                inCodeBlock = false;
+                codeBlockLanguage = '';
+                continue;
+            }
+        }
+        
+        // 如果在代码块中，保留代码行
+        if (inCodeBlock) {
+            codeLines.push(line);
+            continue;
+        }
+        
+        // 不在代码块中，检查是否为有效的代码行
+        // 对于Vue文件，保留所有看起来像代码的行
+        if (language.toLowerCase() === 'vue') {
+            if (isVueCodeLine(trimmedLine)) {
+                codeLines.push(line);
+            }
+        } else {
+            if (isValidCodeLine(trimmedLine, language)) {
+                codeLines.push(line);
+            } else if (isCodeLine(trimmedLine, language)) {
+                // 如果是代码行但被误判，仍然保留
+                codeLines.push(line);
+            }
+        }
+    }
+    
+    return codeLines.join('\n');
+}
+
+/**
+ * 检查是否为Vue代码行
+ * @param line 文本行
+ * @returns 是否为Vue代码行
+ */
+function isVueCodeLine(line: string): boolean {
+    const trimmedLine = line.trim();
+    
+    // 空行不算代码行
+    if (!trimmedLine) return false;
+    
+    // 检查是否为注释行
+    if (isCommentLine(trimmedLine, 'vue')) {
+        return false;
+    }
+    
+    // 检查是否为解释文字
+    if (isExplanationText(trimmedLine)) {
+        return false;
+    }
+    
+    // Vue代码特征
+    const vueCodePatterns = [
+        // HTML标签
+        /^<[a-zA-Z][a-zA-Z0-9]*[^>]*>/,
+        /^<\/[a-zA-Z][a-zA-Z0-9]*>/,
+        /^<[a-zA-Z][a-zA-Z0-9]*\s*\/>/,
+        /^<!DOCTYPE/,
+        /^<\?xml/,
+        /^<!--/,
+        /^-->/,
+        /^<!\[CDATA\[/,
+        /^\]\]>/,
+        // JavaScript代码
+        /^(function|class|const|let|var|if|else|for|while|do|switch|case|default|try|catch|finally|return|throw|import|export|from|async|await)\s/,
+        /^\s*(function|class|const|let|var|if|else|for|while|do|switch|case|default|try|catch|finally|return|throw|import|export|from|async|await)\s/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*[=:]/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(/,
+        /^\s*console\./,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*=>/,
+        /^\s*[{}();]/,
+        // Vue.js 特定模式
+        /^\s*export\s+default\s*{/,
+        /^\s*name\s*:/,
+        /^\s*data\s*\(\s*\)\s*{/,
+        /^\s*return\s*{/,
+        /^\s*methods\s*:\s*{/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*\)\s*{/,
+        /^\s*this\./,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*:\s*['"`]/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*:\s*function/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*\([^)]*\)\s*{/,
+        // CSS样式
+        /^\s*[.#]?[a-zA-Z][a-zA-Z0-9_-]*\s*{/,
+        /^\s*@[a-zA-Z-]+/,
+        /^\s*[a-zA-Z-]+\s*:/,
+        /^\s*[{}();]/,
+        // 其他代码特征
+        /^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*[=:]/,
+        /^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\(/,
+        /^\s*\/\//,
+        /^\s*#/,
+        /^\s*\/\*/,
+        /^\s*\*\//,
+        /^\s*\/\*.*\*\//,
+        /^\s*\/\/.*$/,
+        /^\s*#.*$/
+    ];
+    
+    return vueCodePatterns.some(pattern => pattern.test(trimmedLine));
+}
+
+/**
+ * 检查是否为有效的代码行（不是注释或解释文字）
+ * @param line 文本行
+ * @param language 编程语言
+ * @returns 是否为有效代码行
+ */
+function isValidCodeLine(line: string, language: string): boolean {
+    if (!line) return false;
+    
+    // 检查是否为注释行
+    if (isCommentLine(line, language)) {
+        return false;
+    }
+    
+    // 检查是否为解释文字
+    if (isExplanationText(line)) {
+        return false;
+    }
+    
+    // 检查是否为代码行
+    return isCodeLine(line, language);
+}
+
+/**
+ * 检查是否为注释行
+ * @param line 文本行
+ * @param language 编程语言
+ * @returns 是否为注释行
+ */
+function isCommentLine(line: string, language: string): boolean {
+    const trimmedLine = line.trim();
+    
+    // 检查各种注释格式
+    const commentPatterns = [
+        /^\/\//,           // JavaScript/Java/C# 单行注释
+        /^#/,              // Python/Shell 注释
+        /^--/,             // SQL 注释
+        /^\/\*/,           // 多行注释开始
+        /^\*/,             // 多行注释中间
+        /^\*\/$/,          // 多行注释结束
+        /^<!--/,           // HTML 注释
+        /^-->$/,           // HTML 注释结束
+    ];
+    
+    return commentPatterns.some(pattern => pattern.test(trimmedLine));
+}
+
+/**
+ * 检查是否为解释文字
+ * @param line 文本行
+ * @returns 是否为解释文字
+ */
+function isExplanationText(line: string): boolean {
+    const trimmedLine = line.trim();
+    
+    // 检查是否包含中文字符且不是代码
+    if (/[\u4e00-\u9fa5]/.test(trimmedLine)) {
+        // 如果包含中文且不包含代码特征，则认为是解释文字
+        const codePatterns = [
+            /<[^>]+>/,      // HTML标签
+            /[{}();]/,      // 代码符号
+            /^\s*[a-zA-Z_][a-zA-Z0-9_]*\s*[=:]/,  // 变量赋值
+            /^\s*(function|class|def|if|for|while|return|import|export)\s/,  // 关键字
+        ];
+        
+        return !codePatterns.some(pattern => pattern.test(trimmedLine));
+    }
+    
+    // 检查是否为纯英文解释文字
+    const explanationPatterns = [
+        /^[A-Z][a-z\s]+:$/,  // 标题格式
+        /^[a-z\s]+\.$/,      // 句子结尾
+        /^This\s/,           // 以This开头
+        /^The\s/,            // 以The开头
+        /^Here\s/,           // 以Here开头
+    ];
+    
+    return explanationPatterns.some(pattern => pattern.test(trimmedLine));
+}
+
+/**
+ * 检测是否为中文注释
+ * @param line 文本行
+ * @param language 编程语言
+ * @returns 是否为中文注释
+ */
+function isChineseComment(line: string, language: string): boolean {
+    const trimmedLine = line.trim();
+    
+    // 检查是否包含中文字符
+    if (!/[\u4e00-\u9fa5]/.test(trimmedLine)) {
+        return false;
+    }
+    
+    // 根据语言检查注释格式
+    switch (language.toLowerCase()) {
+        case 'vue':
+        case 'html':
+        case 'xml':
+            // HTML注释格式 <!-- 中文注释 -->
+            return /^<!--\s*[\u4e00-\u9fa5]/.test(trimmedLine) || 
+                   /^<!--[\s\S]*[\u4e00-\u9fa5][\s\S]*-->$/.test(trimmedLine);
+        
+        case 'javascript':
+        case 'typescript':
+        case 'java':
+        case 'csharp':
+        case 'cpp':
+        case 'c':
+        case 'go':
+        case 'rust':
+        case 'php':
+        case 'swift':
+        case 'kotlin':
+            // 单行注释格式 // 中文注释
+            return /^\/\/\s*[\u4e00-\u9fa5]/.test(trimmedLine) ||
+                   // 多行注释格式 /* 中文注释 */
+                   /^\/\*[\s\S]*[\u4e00-\u9fa5][\s\S]*\*\/$/.test(trimmedLine);
+        
+        case 'python':
+        case 'ruby':
+        case 'bash':
+        case 'shell':
+        case 'yaml':
+            // 单行注释格式 # 中文注释
+            return /^#\s*[\u4e00-\u9fa5]/.test(trimmedLine);
+        
+        case 'css':
+            // CSS注释格式 /* 中文注释 */
+            return /^\/\*[\s\S]*[\u4e00-\u9fa5][\s\S]*\*\/$/.test(trimmedLine);
+        
+        case 'sql':
+            // SQL注释格式 -- 中文注释
+            return /^--\s*[\u4e00-\u9fa5]/.test(trimmedLine);
+        
+        default:
+            // 默认检查常见的注释格式
+            return /^(\/\/|#|--|\/\*|<!--)\s*[\u4e00-\u9fa5]/.test(trimmedLine) ||
+                   /^(\/\/|#|--|\/\*|<!--)[\s\S]*[\u4e00-\u9fa5][\s\S]*(\*\/|-->)?$/.test(trimmedLine);
+    }
 }
 
 /**
@@ -416,7 +706,18 @@ function isJavaScriptCodeLine(line: string): boolean {
         /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*=>/,
         /^\s*[{}();]/,
         /^\s*\/\*.*\*\//,
-        /^\s*\/\/.*$/
+        /^\s*\/\/.*$/,
+        // Vue.js 特定模式
+        /^\s*export\s+default\s*{/,
+        /^\s*name\s*:/,
+        /^\s*data\s*\(\s*\)\s*{/,
+        /^\s*return\s*{/,
+        /^\s*methods\s*:\s*{/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*\)\s*{/,
+        /^\s*this\./,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*:\s*['"`]/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*:\s*function/,
+        /^\s*[a-zA-Z_$][a-zA-Z0-9_$]*\s*\([^)]*\)\s*{/
     ];
     
     return codePatterns.some(pattern => pattern.test(line));

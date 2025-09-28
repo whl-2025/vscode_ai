@@ -3,7 +3,7 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 import { detectLanguageFromCode, getFileExtension } from './language-detection';
-// 移除代码清理导入，现在直接保存原始内容
+import { cleanAICodeResponse } from './code-cleaner';
 import { DatabaseManager, ChatSession, ChatMessage as DBChatMessage, GeneratedFile } from './database-manager';
 import { PromptManager } from './prompts/prompt-manager';
 import * as path from 'path';
@@ -933,8 +933,9 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
 
     const fileUri = vscode.Uri.file(path.join(generatedFolderPath, fileName));
 
-    // 在保存前清理代码块标识符和中文解释
-    const finalCode = cleanCodeBlockMarkers(code);
+    // 在保存前提取纯净代码，删除所有注释和解释文字
+    const cleanedCode = cleanAICodeResponse(code, language, true, true); // 启用删除中文注释和纯净代码提取
+    const finalCode = cleanCodeBlockMarkers(cleanedCode.cleanedCode);
 
     // 写入文件
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(finalCode, 'utf8'));
