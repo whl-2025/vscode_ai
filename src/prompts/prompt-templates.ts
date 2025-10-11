@@ -54,7 +54,14 @@ export const EDIT_INSTRUCTIONS = `不要尝试在未先阅读的情况下编辑�
 changed code
 // ...existing code...
 changed code
-// ...existing code...`;
+// ...existing code...
+
+【编辑模式-严格规则（减少重复专用）】
+1) 仅输出可直接保存的完整文件正文，禁止任何解释、示例、前后缀或代码围栏（三个反引号）。
+2) 若目标为 Vue 单文件组件（.vue）：文件内必须且只能有一个 <template>、一个 <script>、一个 <style> 区块，禁止生成多个或嵌套的同名区块。
+3) 保持未涉及部分的原样与缩进风格；除非为修复语法错误，禁止新增无关标签或重复元素（如<button>/<p>/<div>/<h1>等重复行）。
+4) 禁止输出省略号、占位符或“这里添加内容”等描述；所有内容必须完整可运行。
+5) 若用户未要求新增样式或脚本，不要创建空的 <style>/<script>。`;
 
 // 中文特色指令（保持原有特色）
 export const CHINESE_INSTRUCTIONS = `你是一个专业的代码分析助手。请用中文详细分析用户提供的文件内容。

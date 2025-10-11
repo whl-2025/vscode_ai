@@ -1,14 +1,140 @@
 <template>
-  <div class="hello-world">Hello, Vue! {{ message }}</div>
+
+    <div class="hello-world">Hello, Vue! {{ message }} <button @click.stop='handleClickButton() '> 点击我！ </button>
+</div>
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </button>
+<br />
+<p v-if="(isVisible)" >你好，用户。这是一个按钮组件的示例 </p>
+<br />
+<button @click.stop ='handleClickButton() '> 点击我！ </
+
 </template>
+
+
 <script>
-export default {
-  name: 'HelloWorld',
-  data() {
-    return {
-      message: "Welcome back!"
-    };
-  },
-  mounted() {},
-};
+
+    export default {
+    name: 'Component'
+    }
+
 </script>
+
+
+<style scoped>
+    /* 样式 */
+
+</style>

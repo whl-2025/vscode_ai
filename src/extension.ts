@@ -870,6 +870,66 @@ function calculateNaturalLanguageRatio(text: string): number {
     return naturalLanguageChars / totalChars;
 }
 
+/**
+ * 检测用户是否有编辑文件的意图
+ * @param userText 用户输入的问题
+ * @returns 是否有编辑意图
+ */
+function detectEditIntent(userText: string): boolean {
+    if (!userText) return false;
+    
+    const editKeywords = [
+        // 中文编辑关键词
+        '添加', '增加', '修改', '更改', '编辑', '删除', '移除', '替换', '更新', '调整',
+        '插入', '补充', '完善', '优化', '改进', '重构', '重写', '修正', '修复', '调试',
+        '在模板里', '在文件中', '在代码中', '在组件中', '在函数中', '在类中',
+        '添加按钮', '添加功能', '添加方法', '添加属性', '添加样式', '添加事件',
+        '修改样式', '修改逻辑', '修改结构', '修改内容', '修改配置',
+        '删除代码', '删除函数', '删除方法', '删除属性', '删除样式',
+        '替换为', '改为', '改成', '变成', '转换为',
+        
+        // 英文编辑关键词
+        'add', 'insert', 'append', 'prepend', 'modify', 'change', 'edit', 'update', 'alter',
+        'remove', 'delete', 'replace', 'substitute', 'fix', 'debug', 'refactor', 'rewrite',
+        'in template', 'in file', 'in code', 'in component', 'in function', 'in class',
+        'add button', 'add function', 'add method', 'add property', 'add style', 'add event',
+        'modify style', 'modify logic', 'modify structure', 'modify content', 'modify config',
+        'delete code', 'delete function', 'delete method', 'delete property', 'delete style',
+        'replace with', 'change to', 'convert to', 'transform to'
+    ];
+    
+    const lowerText = userText.toLowerCase();
+    
+    // 检查是否包含编辑关键词
+    const hasEditKeyword = editKeywords.some(keyword => 
+        lowerText.includes(keyword.toLowerCase())
+    );
+    
+    // 检查是否包含具体的编辑指令模式
+    const editPatterns = [
+        /在.*?里.*?添加/i,
+        /在.*?中.*?添加/i,
+        /在.*?里.*?修改/i,
+        /在.*?中.*?修改/i,
+        /在.*?里.*?删除/i,
+        /在.*?中.*?删除/i,
+        /把.*?改为/i,
+        /把.*?改成/i,
+        /把.*?替换为/i,
+        /添加.*?到.*?中/i,
+        /修改.*?为/i,
+        /删除.*?中的/i,
+        /在.*?添加.*?按钮/i,
+        /在.*?添加.*?功能/i,
+        /在.*?添加.*?方法/i,
+        /在.*?添加.*?样式/i
+    ];
+    
+    const hasEditPattern = editPatterns.some(pattern => pattern.test(userText));
+    
+    return hasEditKeyword || hasEditPattern;
+}
+
 async function saveCodeToFile(code: string, language: string, sessionId?: string, messageId?: number): Promise<string> {
     let baseFileName = 'generated';
     let fileExtension = '';
@@ -1227,6 +1287,11 @@ class ChatPanel {
                 return;
             }
             
+            if (msg?.type === 'applyEditResult') {
+                await this.handleApplyEditResult(msg);
+                return;
+            }
+            
             if (msg?.type === 'addContext') {
                 // 获取最近打开的文件编辑器
                 const recentFiles = vscode.window.tabGroups.all
@@ -1285,6 +1350,15 @@ class ChatPanel {
             if (msg?.type === 'send' && (typeof msg.text === 'string' || msg.fileContent)) {
                 const cfg = getConfiguration();
                 
+                // 检测编辑意图
+                const userText = msg.text?.trim() || '';
+                const hasEditIntent = detectEditIntent(userText);
+                log('info', 'ChatPanel: 检测编辑意图', { 
+                    userText: userText, 
+                    hasEditIntent: hasEditIntent,
+                    hasFileContent: !!(msg.fileContent && msg.fileName)
+                });
+                
                 // 验证文件内容是否有效
                 if (msg.fileContent && msg.fileContent.trim().length === 0) {
                     log('info', '收到空文件内容', { fileName: msg.fileName });
@@ -1325,11 +1399,10 @@ class ChatPanel {
                 }
                 
                 // 处理文件内容拼接（在后端处理，避免前端JavaScript复杂性）
-                const originalUserText = msg.text?.trim() || '';
-                let userTextForModel = originalUserText;
+                let userTextForModel = userText;
                 
                 // 确保至少有一种内容
-                if (!originalUserText && !msg.fileContent) {
+                if (!userText && !msg.fileContent) {
                     log('info', '收到send消息但既无text也无fileContent', { msg });
                     return;
                 }
@@ -1367,18 +1440,37 @@ class ChatPanel {
                             fileTypeHint = '请分析这个文件的内容、结构和功能。';
                     }
                     
-                    // 最简单直接的文件内容格式
-                    userTextForModel = `分析这个${fileExt}文件:
+                    // 根据编辑意图调整提示词
+                    if (hasEditIntent) {
+                        // 编辑模式：要求模型直接输出修改后的完整文件内容
+                        userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请严格按照以下要求：
+
+1. 只输出修改后的完整文件内容
+2. 不要使用任何代码块标记（如\`\`\`vue、\`\`\`等）
+3. 不要添加任何解释文字或注释
+4. 确保代码语法正确，包含所有必要的开始和结束标签
+5. 保持原有的文件格式和缩进
+
+原文件内容：
+${msg.fileContent}
+
+用户要求：${userText}
+
+请直接输出修改后的完整文件内容（仅代码，无其他内容）：`;
+                    } else {
+                        // 分析模式：保持原有逻辑
+                        userTextForModel = `分析这个${fileExt}文件:
 
 ${msg.fileContent}
 
-${originalUserText ? `问题: ${originalUserText}` : ''}`; 
+${userText ? `问题: ${userText}` : ''}`;
+                    } 
                     
                     log('info', '构建文件分析提示', {
                         fileName: msg.fileName,
                         fileExt: fileExt || '未知',
                         contentLength: msg.fileContent.length,
-                        originalQuestion: originalUserText || '默认文件分析问题',
+                        originalQuestion: userText || '默认文件分析问题',
                         hasContent: true
                     });
                 } else {
@@ -1402,7 +1494,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 
                 // 如果没有原始文本且没有文件内容，则跳过
                 if (!userTextForModel) {
-                    log('info', '构建的userTextForModel为空', { originalUserText, fileContent: !!msg.fileContent });
+                    log('info', '构建的userTextForModel为空', { userText, fileContent: !!msg.fileContent });
                     return;
                 }
                 
@@ -1416,12 +1508,12 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     hasFileContent: !!(msg.fileContent && msg.fileName),
                     fileName: msg.fileName || 'none',
                     fileContentLength: msg.fileContent?.length || 0,
-                    originalText: originalUserText,
+                    originalText: userText,
                     msgKeys: Object.keys(msg)
                 });
                 
                 // 前端显示简洁的提示或原始问题
-                const displayText = msg.displayText || originalUserText || `[📄 分析文件: ${msg.fileName}]`;
+                const displayText = msg.displayText || userText || `[📄 分析文件: ${msg.fileName}]`;
                 this._panel.webview.postMessage({ type: 'appendUser', text: displayText });
 
                 currentController = new AbortController();
@@ -1456,7 +1548,10 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                             this._panel.webview.postMessage({ type: 'appendAssistantChunk', text: assistantText });
                         }
                         this._messages.push({ role: 'assistant', content: assistantText });
-                        this._panel.webview.postMessage({ type: 'finalizeAssistant' });
+                        this._panel.webview.postMessage({ 
+                            type: 'finalizeAssistant',
+                            hasEditIntent: hasEditIntent && !!(msg.fileContent && msg.fileName)
+                        });
                         log('debug', 'Assistant message generated', { length: assistantText.length });
                     }
                 } catch (err: any) {
@@ -1494,6 +1589,388 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         }, undefined, this._disposables);
 
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+    }
+
+    private cleanModelResponse(content: string): string {
+        // 移除代码块标识符
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除多余的解释文字（通常在代码块后面）
+        const lines = cleaned.split('\n');
+        const codeLines = [];
+        
+        for (let line of lines) {
+            // 如果遇到中文解释文字，停止处理
+            if (line.trim() && /[\u4e00-\u9fff]/.test(line) && !line.includes('<') && !line.includes('//') && !line.includes('/*') && !line.includes('<!--')) {
+                break;
+            }
+            codeLines.push(line);
+        }
+        
+        cleaned = codeLines.join('\n').trim();
+        
+        // 修复常见的语法错误
+        cleaned = cleaned
+            .replace(/< /g, '<')  // 修复 < / 为 <
+            .replace(/ >/g, '>')  // 修复 > 前的空格
+            .replace(/`>/g, '>')  // 修复 `> 为 >
+            .replace(/`</g, '<')  // 修复 `< 为 <
+            .replace(/`/g, '')    // 移除多余的 `
+            .replace(/< \/ /g, '</')  // 修复 </ 标签
+            .replace(/< \/script>/g, '</script>')  // 修复 </script> 标签
+            .replace(/< \/style>/g, '</style>')    // 修复 </style> 标签
+            .replace(/< \/template>/g, '</template>')  // 修复 </template> 标签
+            .replace(/\s+/g, ' ') // 合并多个空格
+            .replace(/>\s+</g, '><') // 修复标签间的多余空格
+        
+        // 去除重复和无用的代码
+        cleaned = this.removeDuplicateCode(cleaned);
+        
+        // 验证和修复代码结构
+        cleaned = this.validateAndFixCode(cleaned);
+        
+        // 格式化代码，添加适当的换行和缩进
+        cleaned = this.formatCode(cleaned)
+        
+        return cleaned;
+    }
+
+    private removeDuplicateCode(code: string): string {
+        // 检测并移除重复的代码块
+        const lines = code.split('\n');
+        const seenLines = new Set<string>();
+        const uniqueLines = [];
+        
+        for (let line of lines) {
+            const trimmedLine = line.trim();
+            
+            // 跳过空行
+            if (!trimmedLine) {
+                uniqueLines.push(line);
+                continue;
+            }
+            
+            // 检查是否是重复的代码块
+            if (seenLines.has(trimmedLine)) {
+                // 如果是重复的template标签或script标签，跳过
+                if (trimmedLine.includes('<template') || trimmedLine.includes('<script') || 
+                    trimmedLine.includes('<style') || trimmedLine.includes('</template') ||
+                    trimmedLine.includes('</script') || trimmedLine.includes('</style')) {
+                    continue;
+                }
+                
+                // 如果是重复的按钮或段落，跳过
+                if (trimmedLine.includes('<button') || trimmedLine.includes('<p') ||
+                    trimmedLine.includes('1234567890qwertyuiopasdfghjklzxcvbnm')) {
+                    continue;
+                }
+                
+                // 如果是重复的div标签，跳过
+                if (trimmedLine.includes('<div') || trimmedLine.includes('</div')) {
+                    continue;
+                }
+                
+                // 如果是重复的br标签，跳过
+                if (trimmedLine.includes('<br')) {
+                    continue;
+                }
+            }
+            
+            seenLines.add(trimmedLine);
+            uniqueLines.push(line);
+        }
+        
+        return uniqueLines.join('\n');
+    }
+
+    private validateAndFixCode(code: string): string {
+        // 强大的代码清理和修复
+        let fixed = code;
+        
+        // 第一步：移除所有重复的fallback模板和嵌套结构（兼容任意空白/属性写法）
+        fixed = fixed.replace(/<template\s+#[^>]*>[\s\S]*?<\/template>/gis, '');
+        
+        // 第二步：移除所有重复的空段落和空标签
+        fixed = fixed.replace(/<p>\s*<\/p>/g, '');
+        fixed = fixed.replace(/<div>\s*<\/div>/g, '');
+        
+        // 第三步：修复常见的标签错误
+        fixed = fixed
+            .replace(/<div class="container">="[^"]*"/g, '<div class="container"')  // 修复错误的class属性
+            .replace(/<div class >/g, '<div class="container">')  // 修复class属性
+            .replace(/<P>/g, '<p>')  // 修复P标签
+            .replace(/<\/P>/g, '</p>')  // 修复结束P标签
+            .replace(/<button([^>]*)>([^<]*)<\/div>/g, '<button$1>$2</button>')  // 修复button标签闭合错误
+            .replace(/<br>/g, '<br />')  // 修复br标签
+            .replace(/<br \/>/g, '<br />')  // 确保br标签格式正确
+            .replace(/<!--在这里添加你的内容-->>/g, '')  // 移除错误的注释
+            .replace(/\/P>/g, '</p>')  // 修复错误的结束标签
+            .replace(/<p[^>]*>.*?<!--在这里添加你的内容-->> \/P> -->/g, '')  // 移除错误的段落
+        
+        // 第四步：移除无意义的字符串和数字
+        fixed = fixed
+            .replace(/1234567890qwertyuiopasdfghjklzxcvbnm[^<]*/g, '')  // 移除无意义的字符串
+            .replace(/QWERTYUIOPASDFGHJKLZXCVBNM[^<]*/g, '')  // 移除无意义的字符串
+            .replace(/123[^<]*/g, '')  // 移除数字字符串
+        
+        // 第五步：强制单实例 SFC 区块（只保留首个 template/script/style，其余同名块全部移除）
+        const keepFirstBlock = (html: string, tag: 'template' | 'script' | 'style') => {
+            const openTag = new RegExp(`<${tag}[^>]*>`, 'ig');
+            const closeTag = new RegExp(`</${tag}>`, 'ig');
+            let openCount = 0;
+            let result = '';
+            let idx = 0;
+            while (idx < html.length) {
+                const openMatch = html.substring(idx).match(openTag);
+                const closeMatch = html.substring(idx).match(closeTag);
+                const nextOpen = openMatch ? html.indexOf(openMatch[0], idx) : -1;
+                const nextClose = closeMatch ? html.indexOf(closeMatch[0], idx) : -1;
+                if (nextOpen !== -1 && (nextOpen < nextClose || nextClose === -1)) {
+                    if (openCount === 0) {
+                        // 保留第一个块
+                        result += html.slice(idx, nextOpen) + openMatch![0];
+                    }
+                    idx = nextOpen + openMatch![0].length;
+                    openCount++;
+                } else if (nextClose !== -1) {
+                    if (openCount === 1) {
+                        // 结束第一个块
+                        result += html.slice(idx, nextClose) + closeMatch![0];
+                    }
+                    idx = nextClose + closeMatch![0].length;
+                    openCount = Math.max(0, openCount - 1);
+                    if (openCount === 0) {
+                        // 跳过后续同名块
+                        // 移除其余该标签的所有内容
+                        const rest = html.slice(idx);
+                        const removedRest = rest
+                            .replace(new RegExp(`<${tag}[^>]*>[\s\S]*?</${tag}>`, 'ig'), '')
+                            .replace(new RegExp(`<${tag}[^>]*>[\s\S]*?$`, 'ig'), '');
+                        result += removedRest;
+                        return result;
+                    }
+                } else {
+                    result += html.slice(idx);
+                    break;
+                }
+            }
+            return result || html;
+        };
+
+        fixed = keepFirstBlock(fixed, 'template');
+        fixed = keepFirstBlock(fixed, 'script');
+        fixed = keepFirstBlock(fixed, 'style');
+
+        // 第六步：提取和清理模板内容
+        let templateContent = '';
+        let scriptContent = '';
+        let styleContent = '';
+        
+        // 提取script内容
+        const scriptMatch = fixed.match(/<script>(.*?)<\/script>/s);
+        if (scriptMatch) {
+            scriptContent = scriptMatch[1].trim();
+        }
+        
+        // 提取style内容
+        const styleMatch = fixed.match(/<style[^>]*>(.*?)<\/style>/s);
+        if (styleMatch) {
+            styleContent = styleMatch[1].trim();
+        }
+        
+        // 提取template内容
+        const templateMatch = fixed.match(/<template>(.*?)<\/template>/s);
+        if (templateMatch) {
+            templateContent = templateMatch[1];
+        } else {
+            // 如果没有找到template标签，从整个内容中提取
+            templateContent = fixed
+                .replace(/<script>.*?<\/script>/gs, '')
+                .replace(/<style[^>]*>.*?<\/style>/gs, '')
+                .replace(/<template>|<\/template>/g, '')
+                .trim();
+        }
+        
+        // 第七步：清理模板内容并对同层级重复节点去重
+        if (templateContent) {
+            // 移除script和style标签
+            templateContent = templateContent
+                .replace(/<script>.*?<\/script>/gs, '')
+                .replace(/<style[^>]*>.*?<\/style>/gs, '')
+                // 移除嵌套的 template/fallback 片段与无效 template 标签
+                .replace(/<template\s+#[^>]*>[\s\S]*?<\/template>/gis, '')
+                .replace(/<template[^>]*>/gi, '')
+                .replace(/<\/template>/gi, '')
+                .trim();
+            
+            // 移除同层级重复节点（起始标签与文本完全相同的行）
+            const lines = templateContent.split('\n');
+            const uniqueLines = [];
+            const seenContent = new Set();
+            
+            for (let line of lines) {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) {
+                    uniqueLines.push(line);
+                    continue;
+                }
+                
+                // 检查是否是重复内容
+                if (seenContent.has(trimmedLine)) {
+                    continue;
+                }
+                
+                // 只保留第一个按钮和第一个段落
+                if (/^<button\b/i.test(trimmedLine) && seenContent.has('button')) {
+                    continue;
+                }
+                if (/^<p\b/i.test(trimmedLine) && seenContent.has('paragraph')) {
+                    continue;
+                }
+                
+                if (/^<button\b/i.test(trimmedLine)) {
+                    seenContent.add('button');
+                }
+                if (/^<p\b/i.test(trimmedLine)) {
+                    seenContent.add('paragraph');
+                }
+                
+                seenContent.add(trimmedLine);
+                uniqueLines.push(line);
+            }
+            
+            templateContent = uniqueLines.join('\n').trim();
+        }
+        
+        // 第八步：重新构建正确的Vue结构
+        let result = '';
+        
+        if (templateContent) {
+            result += '<template>\n' + templateContent + '\n</template>\n\n';
+        } else {
+            // 如果没有模板内容，创建一个基本的模板
+            result += '<template>\n  <div>\n    <h1>Hello World</h1>\n  </div>\n</template>\n\n';
+        }
+        
+        if (scriptContent) {
+            result += '<script>\n' + scriptContent + '\n</script>\n\n';
+        } else {
+            result += '<script>\nexport default {\n  name: \'Component\'\n}\n</script>\n\n';
+        }
+        
+        if (styleContent) {
+            result += '<style scoped>\n' + styleContent + '\n</style>';
+        } else {
+            result += '<style scoped>\n/* 样式 */\n</style>';
+        }
+        
+        return result.trim();
+    }
+
+    private formatCode(code: string): string {
+        // 简单的代码格式化，主要针对Vue文件
+        let formatted = code;
+        
+        // 在主要标签之间添加换行
+        formatted = formatted
+            .replace(/></g, '>\n<')  // 在标签之间添加换行
+            .replace(/<template>/g, '<template>\n')  // template标签后换行
+            .replace(/<script>/g, '\n<script>\n')  // script标签前后换行
+            .replace(/<style/g, '\n<style')  // style标签前换行
+            .replace(/<\/template>/g, '\n</template>')  // 结束template标签前换行
+            .replace(/<\/script>/g, '\n</script>')  // 结束script标签前换行
+            .replace(/<\/style>/g, '\n</style>')  // 结束style标签前换行
+        
+        // 添加基本的缩进
+        const lines = formatted.split('\n');
+        const formattedLines = [];
+        let indentLevel = 0;
+        
+        for (let line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) {
+                formattedLines.push('');
+                continue;
+            }
+            
+            // 减少缩进级别（在结束标签之前）
+            if (trimmedLine.startsWith('</')) {
+                indentLevel = Math.max(0, indentLevel - 1);
+            }
+            
+            // 添加缩进
+            const indent = '    '.repeat(indentLevel);
+            formattedLines.push(indent + trimmedLine);
+            
+            // 增加缩进级别（在开始标签之后，但不是自闭合标签）
+            if (trimmedLine.startsWith('<') && !trimmedLine.startsWith('</') && 
+                !trimmedLine.endsWith('/>') && !trimmedLine.includes('</')) {
+                indentLevel++;
+            }
+        }
+        
+        return formattedLines.join('\n').trim();
+    }
+
+    private async handleApplyEditResult(message: any) {
+        try {
+            const { fileName, filePath, editedContent } = message;
+
+            if (!editedContent || !fileName) {
+                vscode.window.showErrorMessage('编辑内容或文件名缺失');
+                return;
+            }
+
+            // 清理模型回答内容
+            const cleanedContent = this.cleanModelResponse(editedContent);
+
+            // 确定文件路径
+            let targetPath = filePath;
+            if (!targetPath) {
+                // 如果没有提供完整路径，尝试在当前工作区中查找文件
+                const workspaceFiles = await vscode.workspace.findFiles(`**/${fileName}`, null, 1);
+                if (workspaceFiles.length > 0) {
+                    targetPath = workspaceFiles[0].fsPath;
+                } else {
+                    vscode.window.showErrorMessage(`找不到文件: ${fileName}`);
+                    return;
+                }
+            }
+
+            // 保存编辑后的内容到文件
+            const uri = vscode.Uri.file(targetPath);
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(cleanedContent, 'utf8'));
+
+            // 显示成功消息
+            const successMessage = `文件 ${fileName} 已成功更新！`;
+            vscode.window.showInformationMessage(successMessage);
+
+            // 发送成功消息到前端
+            this._panel.webview.postMessage({
+                type: 'editResultApplied',
+                fileName: fileName,
+                message: successMessage
+            });
+
+            log('info', 'ChatPanel: 文件编辑结果已应用', {
+                fileName: fileName,
+                filePath: targetPath,
+                originalContentLength: editedContent.length,
+                cleanedContentLength: cleanedContent.length
+            });
+
+        } catch (error) {
+            const errorMessage = `保存文件失败: ${error}`;
+            vscode.window.showErrorMessage(errorMessage);
+
+            // 发送错误消息到前端
+            this._panel.webview.postMessage({
+                type: 'editResultError',
+                error: errorMessage
+            });
+
+            log('info', 'ChatPanel: 应用编辑结果失败', { error: String(error) });
+        }
     }
 
     public dispose() {
@@ -1887,6 +2364,56 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             const vscode = acquireVsCodeApi();
             const messagesEl = document.getElementById('messages');
             const inputEl = document.getElementById('input');
+            
+            // 检测用户是否有编辑文件的意图
+            function detectEditIntent(userText) {
+                if (!userText) return false;
+                
+                const editKeywords = [
+                    // 中文编辑关键词
+                    '添加', '增加', '修改', '更改', '编辑', '删除', '移除', '替换', '更新', '调整',
+                    '优化', '改进', '完善', '修正', '修复', '调整', '重构', '重写', '简化',
+                    '合并', '拆分', '移动', '复制', '粘贴', '插入', '追加', '前置',
+                    // 英文编辑关键词
+                    'add', 'modify', 'change', 'edit', 'delete', 'remove', 'replace', 'update', 'adjust',
+                    'optimize', 'improve', 'fix', 'refactor', 'rewrite', 'simplify', 'merge', 'split',
+                    'move', 'copy', 'paste', 'insert', 'append', 'prepend', 'create', 'generate',
+                    'implement', 'enhance', 'extend', 'customize', 'configure', 'setup', 'install',
+                    'uninstall', 'enable', 'disable', 'activate', 'deactivate', 'toggle', 'switch',
+                    'delete property', 'delete style',
+                    'replace with', 'change to', 'convert to', 'transform to'
+                ];
+                
+                const lowerText = userText.toLowerCase();
+                
+                // 检查是否包含编辑关键词
+                const hasEditKeyword = editKeywords.some(keyword => 
+                    lowerText.includes(keyword.toLowerCase())
+                );
+                
+                // 检查是否包含具体的编辑指令模式
+                const editPatterns = [
+                    /在.*?里.*?添加/i,
+                    /在.*?中.*?添加/i,
+                    /在.*?里.*?修改/i,
+                    /在.*?中.*?修改/i,
+                    /在.*?里.*?删除/i,
+                    /在.*?中.*?删除/i,
+                    /把.*?改为/i,
+                    /把.*?改成/i,
+                    /把.*?替换为/i,
+                    /添加.*?到.*?中/i,
+                    /修改.*?为/i,
+                    /删除.*?中的/i,
+                    /在.*?添加.*?功能/i,
+                    /在.*?添加.*?方法/i,
+                    /在.*?添加.*?样式/i
+                ];
+                
+                const hasEditPattern = editPatterns.some(pattern => pattern.test(userText));
+                
+                return hasEditKeyword || hasEditPattern;
+            }
             let assemblingAssistant = false;
             let lastAssistantEl = null;
             let isGenerating = false;
@@ -2248,6 +2775,102 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 }
             };
 
+            // 显示编辑结果和保存选项
+            function showEditResult(editedContent, fileContext) {
+                console.log('showEditResult 被调用:', {
+                    hasLastAssistantEl: !!lastAssistantEl,
+                    editedContentLength: editedContent?.length || 0,
+                    fileContext: fileContext
+                });
+                
+                if (!lastAssistantEl) {
+                    console.log('lastAssistantEl 不存在，退出');
+                    return;
+                }
+                
+                // 创建编辑结果容器
+                const editResultContainer = document.createElement('div');
+                editResultContainer.className = 'edit-result-container';
+                editResultContainer.style.marginTop = '12px';
+                editResultContainer.style.padding = '12px';
+                editResultContainer.style.border = '1px solid #4e94ce';
+                editResultContainer.style.borderRadius = '6px';
+                editResultContainer.style.background = '#1e1e1e';
+                
+                // 添加标题
+                const title = document.createElement('div');
+                title.textContent = '📝 文件编辑结果';
+                title.style.fontWeight = 'bold';
+                title.style.marginBottom = '8px';
+                title.style.color = '#4e94ce';
+                editResultContainer.appendChild(title);
+                
+                // 添加编辑后的内容预览
+                const preview = document.createElement('div');
+                preview.textContent = editedContent.substring(0, 200) + (editedContent.length > 200 ? '...' : '');
+                preview.style.fontFamily = 'monospace';
+                preview.style.fontSize = '12px';
+                preview.style.color = '#cccccc';
+                preview.style.marginBottom = '12px';
+                preview.style.padding = '8px';
+                preview.style.background = '#2a2a2a';
+                preview.style.borderRadius = '4px';
+                preview.style.whiteSpace = 'pre-wrap';
+                editResultContainer.appendChild(preview);
+                
+                // 添加按钮容器
+                const buttonContainer = document.createElement('div');
+                buttonContainer.style.display = 'flex';
+                buttonContainer.style.gap = '8px';
+                buttonContainer.style.justifyContent = 'flex-end';
+                
+                // 应用保存按钮
+                const applyBtn = document.createElement('button');
+                applyBtn.textContent = '✅ 应用保存';
+                applyBtn.style.padding = '8px 16px';
+                applyBtn.style.background = '#4e94ce';
+                applyBtn.style.color = 'white';
+                applyBtn.style.border = 'none';
+                applyBtn.style.borderRadius = '4px';
+                applyBtn.style.cursor = 'pointer';
+                applyBtn.style.fontSize = '12px';
+                
+                applyBtn.addEventListener('click', () => {
+                    // 发送保存编辑结果的消息
+                    vscode.postMessage({
+                        type: 'applyEditResult',
+                        fileName: fileContext.fileName,
+                        filePath: fileContext.filePath,
+                        editedContent: editedContent
+                    });
+                    
+                    // 移除编辑结果容器
+                    editResultContainer.remove();
+                });
+                
+                // 取消按钮
+                const cancelBtn = document.createElement('button');
+                cancelBtn.textContent = '❌ 取消';
+                cancelBtn.style.padding = '8px 16px';
+                cancelBtn.style.background = '#666';
+                cancelBtn.style.color = 'white';
+                cancelBtn.style.border = 'none';
+                cancelBtn.style.borderRadius = '4px';
+                cancelBtn.style.cursor = 'pointer';
+                cancelBtn.style.fontSize = '12px';
+                
+                cancelBtn.addEventListener('click', () => {
+                    editResultContainer.remove();
+                });
+                
+                buttonContainer.appendChild(cancelBtn);
+                buttonContainer.appendChild(applyBtn);
+                editResultContainer.appendChild(buttonContainer);
+                
+                // 添加到消息后面
+                lastAssistantEl.insertAdjacentElement('afterend', editResultContainer);
+            }
+
             // 添加保存按钮到最后一条助手消息的右下角
             function addSaveButtonToLastMessage() {
                 if (lastAssistantEl) {
@@ -2286,8 +2909,30 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 if (msg.type === 'finalizeAssistant') {
                     assemblingAssistant = false;
                     hideLoading();
-                    // 在模型生成完内容后添加保存按钮
-                    addSaveButtonToLastMessage();
+                    
+                    // 检查是否有编辑意图和文件上下文（只要选择了文件即可）
+                    const hasEditIntent = msg.hasEditIntent || false;
+                    const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file');
+                    
+                    console.log('finalizeAssistant 调试信息:', {
+                        hasEditIntent: hasEditIntent,
+                        hasFileContext: hasFileContext,
+                        selectedContextsLength: selectedContexts.length,
+                        selectedContexts: selectedContexts,
+                        lastAssistantEl: !!lastAssistantEl,
+                        assistantTextLength: lastAssistantEl ? lastAssistantEl.textContent?.length : 0,
+                        msg: msg
+                    });
+                    
+                    if (hasEditIntent && hasFileContext && lastAssistantEl) {
+                        console.log('进入编辑模式，显示编辑结果');
+                        // 编辑模式：显示编辑后的内容并提供保存选项
+                        showEditResult(lastAssistantEl.textContent || '', selectedContexts[0]);
+                    } else {
+                        console.log('进入普通模式，添加保存按钮');
+                        // 普通模式：添加保存按钮
+                        addSaveButtonToLastMessage();
+                    }
                     // 注意：不清除上下文选择，保持用户选择的文件
                 }
                 if (msg.type === 'showContextPanel' && filePanelEl) {
@@ -2329,9 +2974,43 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 if (msg.type === 'chatLoaded') {
                     messagesEl.innerHTML = '';
                     currentChatId = msg.chatId;
-                    msg.messages.forEach(message => {
-                        append(message.role, message.content);
+                    
+                    // 加载消息并检查最后一条助手消息是否需要显示编辑结果
+                    let lastAssistantMessage = null;
+                    msg.messages.forEach((message, index) => {
+                        const messageEl = append(message.role, message.content);
+                        if (message.role === 'assistant') {
+                            lastAssistantMessage = messageEl;
+                        }
                     });
+                    
+                    // 检查最后一条助手消息是否需要显示编辑结果弹窗
+                    if (lastAssistantMessage && msg.messages.length >= 2) {
+                        const lastUserMessage = msg.messages[msg.messages.length - 2];
+                        const lastAssistantContent = msg.messages[msg.messages.length - 1];
+                        
+                        // 检测用户消息是否有编辑意图
+                        const hasEditIntent = detectEditIntent(lastUserMessage.content);
+                        
+                        // 检查是否有文件上下文（这里需要从历史记录中恢复上下文信息）
+                        const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file' && ctx.content);
+                        
+                        console.log('历史对话加载 - 检查编辑意图:', {
+                            hasEditIntent: hasEditIntent,
+                            hasFileContext: hasFileContext,
+                            lastUserMessage: lastUserMessage.content,
+                            lastAssistantContent: lastAssistantContent.content.substring(0, 100) + '...'
+                        });
+                        
+                        // 如果有编辑意图，显示编辑结果弹窗
+                        if (hasEditIntent && hasFileContext) {
+                            // 模拟finalizeAssistant消息来触发编辑结果弹窗
+                            setTimeout(() => {
+                                showEditResult(lastAssistantContent.content, selectedContexts[0]);
+                            }, 100);
+                        }
+                    }
+                    
                     messagesEl.scrollTop = messagesEl.scrollHeight;
                     console.log('ChatPanel: Chat loaded:', currentChatId);
                 }
@@ -2481,6 +3160,9 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'saveToFile':
                     await this.handleSaveToFile(message.text);
+                    break;
+                case 'applyEditResult':
+                    await this.handleApplyEditResult(message);
                     break;
             }
         });
@@ -2755,6 +3437,21 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         const originalUserText = text?.trim() || '';
         let userTextForModel = originalUserText;
         
+        // 检测编辑意图
+        const hasEditIntent = detectEditIntent(originalUserText);
+        log('info', 'ChatViewProvider: 检测编辑意图', { 
+            userText: originalUserText, 
+            hasEditIntent: hasEditIntent,
+            hasFileContent: !!(fileContent && fileName)
+        });
+        
+        // 添加调试信息到前端
+        console.log('编辑意图检测结果:', {
+            userText: originalUserText,
+            hasEditIntent: hasEditIntent,
+            hasFileContent: !!(fileContent && fileName)
+        });
+        
         // 添加文件类型识别和针对性提示
         if (fileContent && fileName) {
             let fileTypeHint = '';
@@ -2788,12 +3485,25 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                     fileTypeHint = '请分析这个文件的内容、结构和功能。';
             }
             
-            // 最简单直接的文件内容格式
-            userTextForModel = `分析这个${fileExt}文件:
+            // 根据编辑意图调整提示词
+            if (hasEditIntent) {
+                // 编辑模式：要求模型直接输出修改后的完整文件内容
+                userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请直接输出修改后的完整文件内容，不要添加任何解释文字。
+
+原文件内容：
+${fileContent}
+
+用户要求：${originalUserText}
+
+请直接输出修改后的完整文件内容：`;
+            } else {
+                // 分析模式：保持原有逻辑
+                userTextForModel = `分析这个${fileExt}文件:
 
 ${fileContent}
 
 ${originalUserText ? `问题: ${originalUserText}` : ''}`;
+            }
             
             log('info', 'ChatViewProvider: 构建文件分析提示', {
                 fileName: fileName,
@@ -2882,14 +3592,19 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     this._view?.webview.postMessage({ type: 'appendAssistantChunk', text: assistantText });
                 }
                 this._messages.push({ role: 'assistant', content: assistantText });
-                this._view?.webview.postMessage({ type: 'finalizeAssistant' });
+                this._view?.webview.postMessage({ 
+                    type: 'finalizeAssistant',
+                    hasEditIntent: hasEditIntent && !!(fileContent && fileName)
+                });
 
                 // 保存助手消息到数据库
                 const assistantMessageId = await this.saveMessageToDatabase('assistant', assistantText);
 
-                // 自动保存生成的代码为文件
-                const language = detectLanguageFromCode(assistantText);
-                await saveCodeToFile(assistantText, language, this._currentSessionId || undefined, assistantMessageId || undefined);
+                // 只有在非编辑模式下才自动保存生成的代码
+                if (!(hasEditIntent && !!(fileContent && fileName))) {
+                    const language = detectLanguageFromCode(assistantText);
+                    await saveCodeToFile(assistantText, language, this._currentSessionId || undefined, assistantMessageId || undefined);
+                }
                 
                 // 如果是第一条用户消息，更新会话标题
                 try {
@@ -2975,6 +3690,336 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
     private clearMessages() {
         this._messages = [];
         this._view?.webview.postMessage({ type: 'cleared' });
+    }
+
+    private cleanModelResponse(content: string): string {
+        // 移除代码块标识符
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除多余的解释文字（通常在代码块后面）
+        const lines = cleaned.split('\n');
+        const codeLines = [];
+        
+        for (let line of lines) {
+            // 如果遇到中文解释文字，停止处理
+            if (line.trim() && /[\u4e00-\u9fff]/.test(line) && !line.includes('<') && !line.includes('//') && !line.includes('/*') && !line.includes('<!--')) {
+                break;
+            }
+            codeLines.push(line);
+        }
+        
+        cleaned = codeLines.join('\n').trim();
+        
+        // 修复常见的语法错误
+        cleaned = cleaned
+            .replace(/< /g, '<')  // 修复 < / 为 <
+            .replace(/ >/g, '>')  // 修复 > 前的空格
+            .replace(/`>/g, '>')  // 修复 `> 为 >
+            .replace(/`</g, '<')  // 修复 `< 为 <
+            .replace(/`/g, '')    // 移除多余的 `
+            .replace(/< \/ /g, '</')  // 修复 </ 标签
+            .replace(/< \/script>/g, '</script>')  // 修复 </script> 标签
+            .replace(/< \/style>/g, '</style>')    // 修复 </style> 标签
+            .replace(/< \/template>/g, '</template>')  // 修复 </template> 标签
+            .replace(/\s+/g, ' ') // 合并多个空格
+            .replace(/>\s+</g, '><') // 修复标签间的多余空格
+        
+        // 去除重复和无用的代码
+        cleaned = this.removeDuplicateCode(cleaned);
+        
+        // 验证和修复代码结构
+        cleaned = this.validateAndFixCode(cleaned);
+        
+        // 格式化代码，添加适当的换行和缩进
+        cleaned = this.formatCode(cleaned)
+        
+        return cleaned;
+    }
+
+    private removeDuplicateCode(code: string): string {
+        // 检测并移除重复的代码块
+        const lines = code.split('\n');
+        const seenLines = new Set<string>();
+        const uniqueLines = [];
+        
+        for (let line of lines) {
+            const trimmedLine = line.trim();
+            
+            // 跳过空行
+            if (!trimmedLine) {
+                uniqueLines.push(line);
+                continue;
+            }
+            
+            // 检查是否是重复的代码块
+            if (seenLines.has(trimmedLine)) {
+                // 如果是重复的template标签或script标签，跳过
+                if (trimmedLine.includes('<template') || trimmedLine.includes('<script') || 
+                    trimmedLine.includes('<style') || trimmedLine.includes('</template') ||
+                    trimmedLine.includes('</script') || trimmedLine.includes('</style')) {
+                    continue;
+                }
+                
+                // 如果是重复的按钮或段落，跳过
+                if (trimmedLine.includes('<button') || trimmedLine.includes('<p') ||
+                    trimmedLine.includes('1234567890qwertyuiopasdfghjklzxcvbnm')) {
+                    continue;
+                }
+                
+                // 如果是重复的div标签，跳过
+                if (trimmedLine.includes('<div') || trimmedLine.includes('</div')) {
+                    continue;
+                }
+                
+                // 如果是重复的br标签，跳过
+                if (trimmedLine.includes('<br')) {
+                    continue;
+                }
+            }
+            
+            seenLines.add(trimmedLine);
+            uniqueLines.push(line);
+        }
+        
+        return uniqueLines.join('\n');
+    }
+
+    private validateAndFixCode(code: string): string {
+        // 强大的代码清理和修复
+        let fixed = code;
+        
+        // 第一步：移除所有重复的fallback模板和嵌套结构
+        fixed = fixed.replace(/<template #fallback[^>]*>.*?<\/template>/gs, '');
+        
+        // 第二步：移除所有重复的空段落和空标签
+        fixed = fixed.replace(/<p>\s*<\/p>/g, '');
+        fixed = fixed.replace(/<div>\s*<\/div>/g, '');
+        
+        // 第三步：修复常见的标签错误
+        fixed = fixed
+            .replace(/<div class="container">="[^"]*"/g, '<div class="container"')  // 修复错误的class属性
+            .replace(/<div class >/g, '<div class="container">')  // 修复class属性
+            .replace(/<P>/g, '<p>')  // 修复P标签
+            .replace(/<\/P>/g, '</p>')  // 修复结束P标签
+            .replace(/<button([^>]*)>([^<]*)<\/div>/g, '<button$1>$2</button>')  // 修复button标签闭合错误
+            .replace(/<br>/g, '<br />')  // 修复br标签
+            .replace(/<br \/>/g, '<br />')  // 确保br标签格式正确
+            .replace(/<!--在这里添加你的内容-->>/g, '')  // 移除错误的注释
+            .replace(/\/P>/g, '</p>')  // 修复错误的结束标签
+            .replace(/<p[^>]*>.*?<!--在这里添加你的内容-->> \/P> -->/g, '')  // 移除错误的段落
+        
+        // 第四步：移除无意义的字符串和数字
+        fixed = fixed
+            .replace(/1234567890qwertyuiopasdfghjklzxcvbnm[^<]*/g, '')  // 移除无意义的字符串
+            .replace(/QWERTYUIOPASDFGHJKLZXCVBNM[^<]*/g, '')  // 移除无意义的字符串
+            .replace(/123[^<]*/g, '')  // 移除数字字符串
+        
+        // 第五步：提取和清理模板内容
+        let templateContent = '';
+        let scriptContent = '';
+        let styleContent = '';
+        
+        // 提取script内容
+        const scriptMatch = fixed.match(/<script>(.*?)<\/script>/s);
+        if (scriptMatch) {
+            scriptContent = scriptMatch[1].trim();
+        }
+        
+        // 提取style内容
+        const styleMatch = fixed.match(/<style[^>]*>(.*?)<\/style>/s);
+        if (styleMatch) {
+            styleContent = styleMatch[1].trim();
+        }
+        
+        // 提取template内容
+        const templateMatch = fixed.match(/<template>(.*?)<\/template>/s);
+        if (templateMatch) {
+            templateContent = templateMatch[1];
+        } else {
+            // 如果没有找到template标签，从整个内容中提取
+            templateContent = fixed
+                .replace(/<script>.*?<\/script>/gs, '')
+                .replace(/<style[^>]*>.*?<\/style>/gs, '')
+                .replace(/<template>|<\/template>/g, '')
+                .trim();
+        }
+        
+        // 第六步：清理模板内容
+        if (templateContent) {
+            // 移除script和style标签
+            templateContent = templateContent
+                .replace(/<script>.*?<\/script>/gs, '')
+                .replace(/<style[^>]*>.*?<\/style>/gs, '')
+                .trim();
+            
+            // 移除重复的按钮和段落
+            const lines = templateContent.split('\n');
+            const uniqueLines = [];
+            const seenContent = new Set();
+            
+            for (let line of lines) {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) {
+                    uniqueLines.push(line);
+                    continue;
+                }
+                
+                // 检查是否是重复内容
+                if (seenContent.has(trimmedLine)) {
+                    continue;
+                }
+                
+                // 只保留第一个按钮和第一个段落
+                if (trimmedLine.includes('<button') && seenContent.has('button')) {
+                    continue;
+                }
+                if (trimmedLine.includes('<p') && seenContent.has('paragraph')) {
+                    continue;
+                }
+                
+                if (trimmedLine.includes('<button')) {
+                    seenContent.add('button');
+                }
+                if (trimmedLine.includes('<p')) {
+                    seenContent.add('paragraph');
+                }
+                
+                seenContent.add(trimmedLine);
+                uniqueLines.push(line);
+            }
+            
+            templateContent = uniqueLines.join('\n').trim();
+        }
+        
+        // 第七步：重新构建正确的Vue结构
+        let result = '';
+        
+        if (templateContent) {
+            result += '<template>\n' + templateContent + '\n</template>\n\n';
+        } else {
+            // 如果没有模板内容，创建一个基本的模板
+            result += '<template>\n  <div>\n    <h1>Hello World</h1>\n  </div>\n</template>\n\n';
+        }
+        
+        if (scriptContent) {
+            result += '<script>\n' + scriptContent + '\n</script>\n\n';
+        } else {
+            result += '<script>\nexport default {\n  name: \'Component\'\n}\n</script>\n\n';
+        }
+        
+        if (styleContent) {
+            result += '<style scoped>\n' + styleContent + '\n</style>';
+        } else {
+            result += '<style scoped>\n/* 样式 */\n</style>';
+        }
+        
+        return result.trim();
+    }
+
+    private formatCode(code: string): string {
+        // 简单的代码格式化，主要针对Vue文件
+        let formatted = code;
+        
+        // 在主要标签之间添加换行
+        formatted = formatted
+            .replace(/></g, '>\n<')  // 在标签之间添加换行
+            .replace(/<template>/g, '<template>\n')  // template标签后换行
+            .replace(/<script>/g, '\n<script>\n')  // script标签前后换行
+            .replace(/<style/g, '\n<style')  // style标签前换行
+            .replace(/<\/template>/g, '\n</template>')  // 结束template标签前换行
+            .replace(/<\/script>/g, '\n</script>')  // 结束script标签前换行
+            .replace(/<\/style>/g, '\n</style>')  // 结束style标签前换行
+        
+        // 添加基本的缩进
+        const lines = formatted.split('\n');
+        const formattedLines = [];
+        let indentLevel = 0;
+        
+        for (let line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) {
+                formattedLines.push('');
+                continue;
+            }
+            
+            // 减少缩进级别（在结束标签之前）
+            if (trimmedLine.startsWith('</')) {
+                indentLevel = Math.max(0, indentLevel - 1);
+            }
+            
+            // 添加缩进
+            const indent = '    '.repeat(indentLevel);
+            formattedLines.push(indent + trimmedLine);
+            
+            // 增加缩进级别（在开始标签之后，但不是自闭合标签）
+            if (trimmedLine.startsWith('<') && !trimmedLine.startsWith('</') && 
+                !trimmedLine.endsWith('/>') && !trimmedLine.includes('</')) {
+                indentLevel++;
+            }
+        }
+        
+        return formattedLines.join('\n').trim();
+    }
+
+    private async handleApplyEditResult(message: any) {
+        try {
+            const { fileName, filePath, editedContent } = message;
+            
+            if (!editedContent || !fileName) {
+                vscode.window.showErrorMessage('编辑内容或文件名缺失');
+                return;
+            }
+
+            // 清理模型回答内容
+            const cleanedContent = this.cleanModelResponse(editedContent);
+            
+            // 确定文件路径
+            let targetPath = filePath;
+            if (!targetPath) {
+                // 如果没有提供完整路径，尝试在当前工作区中查找文件
+                const workspaceFiles = await vscode.workspace.findFiles(`**/${fileName}`, null, 1);
+                if (workspaceFiles.length > 0) {
+                    targetPath = workspaceFiles[0].fsPath;
+                } else {
+                    vscode.window.showErrorMessage(`找不到文件: ${fileName}`);
+                    return;
+                }
+            }
+            
+            // 保存编辑后的内容到文件
+            const uri = vscode.Uri.file(targetPath);
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(cleanedContent, 'utf8'));
+            
+            // 显示成功消息
+            const successMessage = `文件 ${fileName} 已成功更新！`;
+            vscode.window.showInformationMessage(successMessage);
+            
+            // 发送成功消息到前端
+            this._view?.webview.postMessage({
+                type: 'editResultApplied',
+                fileName: fileName,
+                message: successMessage
+            });
+            
+            log('info', 'ChatViewProvider: 文件编辑结果已应用', {
+                fileName: fileName,
+                filePath: targetPath,
+                originalContentLength: editedContent.length,
+                cleanedContentLength: cleanedContent.length
+            });
+            
+        } catch (error) {
+            const errorMessage = `保存文件失败: ${error}`;
+            vscode.window.showErrorMessage(errorMessage);
+            
+            // 发送错误消息到前端
+            this._view?.webview.postMessage({
+                type: 'editResultError',
+                error: errorMessage
+            });
+            
+            log('info', 'ChatViewProvider: 应用编辑结果失败', { error: String(error) });
+        }
     }
 
     private getWebviewContent(webview: vscode.Webview): string {
@@ -3118,7 +4163,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 .messages {
                     flex: 1;
                     overflow-y: auto;
-                    margin-bottom: 80px;
+                    margin-bottom: 10px;
                     padding: 4px;
                 }
                 .message {
@@ -3416,6 +4461,56 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 (function() {
                     const vscode = acquireVsCodeApi();
                     
+                    // 检测用户是否有编辑文件的意图
+                    function detectEditIntent(userText) {
+                        if (!userText) return false;
+                        
+                        const editKeywords = [
+                            // 中文编辑关键词
+                            '添加', '增加', '修改', '更改', '编辑', '删除', '移除', '替换', '更新', '调整',
+                            '优化', '改进', '完善', '修正', '修复', '调整', '重构', '重写', '简化',
+                            '合并', '拆分', '移动', '复制', '粘贴', '插入', '追加', '前置',
+                            // 英文编辑关键词
+                            'add', 'modify', 'change', 'edit', 'delete', 'remove', 'replace', 'update', 'adjust',
+                            'optimize', 'improve', 'fix', 'refactor', 'rewrite', 'simplify', 'merge', 'split',
+                            'move', 'copy', 'paste', 'insert', 'append', 'prepend', 'create', 'generate',
+                            'implement', 'enhance', 'extend', 'customize', 'configure', 'setup', 'install',
+                            'uninstall', 'enable', 'disable', 'activate', 'deactivate', 'toggle', 'switch',
+                            'delete property', 'delete style',
+                            'replace with', 'change to', 'convert to', 'transform to'
+                        ];
+                        
+                        const lowerText = userText.toLowerCase();
+                        
+                        // 检查是否包含编辑关键词
+                        const hasEditKeyword = editKeywords.some(keyword => 
+                            lowerText.includes(keyword.toLowerCase())
+                        );
+                        
+                        // 检查是否包含具体的编辑指令模式
+                        const editPatterns = [
+                            /在.*?里.*?添加/i,
+                            /在.*?中.*?添加/i,
+                            /在.*?里.*?修改/i,
+                            /在.*?中.*?修改/i,
+                            /在.*?里.*?删除/i,
+                            /在.*?中.*?删除/i,
+                            /把.*?改为/i,
+                            /把.*?改成/i,
+                            /把.*?替换为/i,
+                            /添加.*?到.*?中/i,
+                            /修改.*?为/i,
+                            /删除.*?中的/i,
+                            /在.*?添加.*?功能/i,
+                            /在.*?添加.*?方法/i,
+                            /在.*?添加.*?样式/i
+                        ];
+                        
+                        const hasEditPattern = editPatterns.some(pattern => pattern.test(userText));
+                        
+                        return hasEditKeyword || hasEditPattern;
+                    }
+                    
                     // 状态管理
                     let selectedContexts = [];
                     let contextImages = [];
@@ -3661,6 +4756,102 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         });
                     }
                     
+                    // 显示编辑结果和保存选项
+                    function showEditResult(editedContent, fileContext) {
+                        console.log('ChatPanel showEditResult 被调用:', {
+                            hasLastAssistantEl: !!lastAssistantEl,
+                            editedContentLength: editedContent?.length || 0,
+                            fileContext: fileContext
+                        });
+                        
+                        if (!lastAssistantEl) {
+                            console.log('ChatPanel lastAssistantEl 不存在，退出');
+                            return;
+                        }
+                        
+                        // 创建编辑结果容器
+                        const editResultContainer = document.createElement('div');
+                        editResultContainer.className = 'edit-result-container';
+                        editResultContainer.style.marginTop = '12px';
+                        editResultContainer.style.padding = '12px';
+                        editResultContainer.style.border = '1px solid #4e94ce';
+                        editResultContainer.style.borderRadius = '6px';
+                        editResultContainer.style.background = '#1e1e1e';
+
+                        // 添加标题
+                        const title = document.createElement('div');
+                        title.textContent = '📝 文件编辑结果';
+                        title.style.fontWeight = 'bold';
+                        title.style.marginBottom = '8px';
+                        title.style.color = '#4e94ce';
+                        editResultContainer.appendChild(title);
+
+                        // 添加编辑后的内容预览
+                        const preview = document.createElement('div');
+                        preview.textContent = editedContent.substring(0, 200) + (editedContent.length > 200 ? '...' : '');
+                        preview.style.fontFamily = 'monospace';
+                        preview.style.fontSize = '12px';
+                        preview.style.color = '#cccccc';
+                        preview.style.marginBottom = '12px';
+                        preview.style.padding = '8px';
+                        preview.style.background = '#2a2a2a';
+                        preview.style.borderRadius = '4px';
+                        preview.style.whiteSpace = 'pre-wrap';
+                        editResultContainer.appendChild(preview);
+
+                        // 添加按钮容器
+                        const buttonContainer = document.createElement('div');
+                        buttonContainer.style.display = 'flex';
+                        buttonContainer.style.gap = '8px';
+                        buttonContainer.style.justifyContent = 'flex-end';
+
+                        // 应用保存按钮
+                        const applyBtn = document.createElement('button');
+                        applyBtn.textContent = '✅ 应用保存';
+                        applyBtn.style.padding = '8px 16px';
+                        applyBtn.style.background = '#4e94ce';
+                        applyBtn.style.color = 'white';
+                        applyBtn.style.border = 'none';
+                        applyBtn.style.borderRadius = '4px';
+                        applyBtn.style.cursor = 'pointer';
+                        applyBtn.style.fontSize = '12px';
+
+                        applyBtn.addEventListener('click', () => {
+                            // 发送保存编辑结果的消息
+                            vscode.postMessage({
+                                type: 'applyEditResult',
+                                fileName: fileContext.fileName,
+                                filePath: fileContext.filePath,
+                                editedContent: editedContent
+                            });
+
+                            // 移除编辑结果容器
+                            editResultContainer.remove();
+                        });
+
+                        // 取消按钮
+                        const cancelBtn = document.createElement('button');
+                        cancelBtn.textContent = '❌ 取消';
+                        cancelBtn.style.padding = '8px 16px';
+                        cancelBtn.style.background = '#666';
+                        cancelBtn.style.color = 'white';
+                        cancelBtn.style.border = 'none';
+                        cancelBtn.style.borderRadius = '4px';
+                        cancelBtn.style.cursor = 'pointer';
+                        cancelBtn.style.fontSize = '12px';
+
+                        cancelBtn.addEventListener('click', () => {
+                            editResultContainer.remove();
+                        });
+
+                        buttonContainer.appendChild(cancelBtn);
+                        buttonContainer.appendChild(applyBtn);
+                        editResultContainer.appendChild(buttonContainer);
+
+                        // 添加到消息后面
+                        lastAssistantEl.insertAdjacentElement('afterend', editResultContainer);
+                    }
+
                     // 添加保存按钮
                     function addSaveButtonToLastMessage() {
                         if (lastAssistantEl) {
@@ -3834,8 +5025,31 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 break;
                             case 'finalizeAssistant':
                                 assemblingAssistant = false;
-                                addSaveButtonToLastMessage();
                                 hideLoading(); // 隐藏加载状态
+                                
+                                // 检查是否有编辑意图和文件上下文（只要选择了文件即可）
+                                const hasEditIntent = message.hasEditIntent || false;
+                                const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file');
+                                
+                                console.log('ChatPanel finalizeAssistant 调试信息:', {
+                                    hasEditIntent: hasEditIntent,
+                                    hasFileContext: hasFileContext,
+                                    selectedContextsLength: selectedContexts.length,
+                                    selectedContexts: selectedContexts,
+                                    lastAssistantEl: !!lastAssistantEl,
+                                    assistantTextLength: lastAssistantEl ? lastAssistantEl.textContent?.length : 0,
+                                    message: message
+                                });
+                                
+                                if (hasEditIntent && hasFileContext && lastAssistantEl) {
+                                    console.log('ChatPanel 进入编辑模式，显示编辑结果');
+                                    // 编辑模式：显示编辑后的内容并提供保存选项
+                                    showEditResult(lastAssistantEl.textContent || '', selectedContexts[0]);
+                                } else {
+                                    console.log('ChatPanel 进入普通模式，添加保存按钮');
+                                    // 普通模式：添加保存按钮
+                                    addSaveButtonToLastMessage();
+                                }
                                 break;
                             case 'appendAssistant':
                                 addMessage('assistant', message.text);
@@ -3843,6 +5057,15 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                             case 'error':
                                 addMessage('system', String(message.text || 'Error'));
                                 hideLoading(); // 隐藏加载状态
+                                break;
+                            case 'applyEditResult':
+                                // 处理应用编辑结果的消息（这个应该由后端处理，前端不需要特殊处理）
+                                break;
+                            case 'editResultApplied':
+                                addMessage('system', message.message);
+                                break;
+                            case 'editResultError':
+                                addMessage('system', '编辑文件失败: ' + message.error);
                                 break;
                             case 'stopGenerating':
                                 hideLoading(); // 隐藏加载状态
@@ -3869,9 +5092,43 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                             case 'chatLoaded':
                                 messagesEl.innerHTML = '';
                                 currentChatId = message.chatId;
-                                message.messages.forEach(msg => {
-                                    addMessage(msg.role, msg.content);
+                                
+                                // 加载消息并检查最后一条助手消息是否需要显示编辑结果
+                                let lastAssistantMessageEl = null;
+                                message.messages.forEach((msg, index) => {
+                                    const messageEl = addMessage(msg.role, msg.content);
+                                    if (msg.role === 'assistant') {
+                                        lastAssistantMessageEl = messageEl;
+                                    }
                                 });
+                                
+                                // 检查最后一条助手消息是否需要显示编辑结果弹窗
+                                if (lastAssistantMessageEl && message.messages.length >= 2) {
+                                    const lastUserMessage = message.messages[message.messages.length - 2];
+                                    const lastAssistantContent = message.messages[message.messages.length - 1];
+                                    
+                                    // 检测用户消息是否有编辑意图
+                                    const hasEditIntent = detectEditIntent(lastUserMessage.content);
+                                    
+                                    // 检查是否有文件上下文
+                                    const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file' && ctx.content);
+                                    
+                                    console.log('ChatPanel 历史对话加载 - 检查编辑意图:', {
+                                        hasEditIntent: hasEditIntent,
+                                        hasFileContext: hasFileContext,
+                                        lastUserMessage: lastUserMessage.content,
+                                        lastAssistantContent: lastAssistantContent.content.substring(0, 100) + '...'
+                                    });
+                                    
+                                    // 如果有编辑意图，显示编辑结果弹窗
+                                    if (hasEditIntent && hasFileContext) {
+                                        // 模拟finalizeAssistant消息来触发编辑结果弹窗
+                                        setTimeout(() => {
+                                            showEditResult(lastAssistantContent.content, selectedContexts[0]);
+                                        }, 100);
+                                    }
+                                }
+                                
                                 messagesEl.scrollTop = messagesEl.scrollHeight;
                                 break;
                             case 'chatDeleted':
