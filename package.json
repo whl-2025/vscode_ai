@@ -15,7 +15,7 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": [     
+    "commands": [
       {
         "command": "ccdc.openChat",
         "title": "Ccdc: Open Chat"
@@ -43,6 +43,38 @@
       {
         "command": "ccdc.showStats",
         "title": "Ccdc: Show Statistics"
+      },
+      {
+        "command": "ccdc.showMainDatabase",
+        "title": "Ccdc: Show Main Database Info"
+      },
+      {
+        "command": "ccdc.showProjectDatabase",
+        "title": "Ccdc: Show Project Database Info"
+      },
+      {
+        "command": "ccdc.showSessions",
+        "title": "Ccdc: Show Chat Sessions"
+      },
+      {
+        "command": "ccdc.showGeneratedFiles",
+        "title": "Ccdc: Show Generated Files"
+      },
+      {
+        "command": "ccdc.searchMessages",
+        "title": "Ccdc: Search Messages"
+      },
+      {
+        "command": "ccdc.testSQLite",
+        "title": "Ccdc: Test SQLite"
+      },
+      {
+        "command": "ccdc.checkStorage",
+        "title": "Ccdc: Check Storage Status"
+      },
+      {
+        "command": "ccdc.checkStorageStatus",
+        "title": "Ccdc: Check Storage Status (Detailed)"
       }
     ],
     "viewsContainers": {
@@ -105,7 +137,10 @@
         },
         "ccdcCodeGen.promptMode": {
           "type": "string",
-          "enum": ["basic", "enhanced"],
+          "enum": [
+            "basic",
+            "enhanced"
+          ],
           "default": "enhanced",
           "description": "AI助手的提示词模式：basic（基础）、enhanced（增强）"
         },
@@ -148,7 +183,11 @@
         "ccdcCodeGen.logLevel": {
           "type": "string",
           "default": "info",
-          "enum": ["none", "info", "debug"],
+          "enum": [
+            "none",
+            "info",
+            "debug"
+          ],
           "description": "The logging level for the extension."
         },
         "ccdcCodeGen.useDatabase": {
@@ -168,7 +207,10 @@
         },
         "ccdcCodeGen.storageStrategy": {
           "type": "string",
-          "enum": ["workspace", "global"],
+          "enum": [
+            "workspace",
+            "global"
+          ],
           "default": "workspace",
           "description": "Storage strategy: 'workspace' for per-project storage, 'global' for cross-project storage"
         }
@@ -179,7 +221,14 @@
     "build": "tsc -p .",
     "watch": "tsc -w -p ."
   },
+  "dependencies": {
+    "sqlite3": "^5.1.6"
+  },
+  "bundleDependencies": [
+    "sqlite3"
+  ],
   "devDependencies": {
+    "@types/sqlite3": "^3.1.8",
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.4.0"
