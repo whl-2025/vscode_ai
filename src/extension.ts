@@ -1557,9 +1557,21 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
 
     const fileUri = vscode.Uri.file(path.join(generatedFolderPath, fileName));
 
-    // 在保存前提取纯净代码，删除所有注释和解释文字
-    const cleanedCode = cleanAICodeResponse(code, language, true, true); // 启用删除中文注释和纯净代码提取
-    const finalCode = cleanCodeBlockMarkers(cleanedCode.cleanedCode);
+    // 根据文件类型决定是否清理代码
+    let finalCode = code;
+    
+    // 对于代码文件（vue、py、js、ts等），清理注释和解释文字
+    const codeFileExtensions = ['.vue', '.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.scss', '.less', '.xml', '.json', '.yaml', '.yml'];
+    const isCodeFile = codeFileExtensions.some(ext => fileExtension.toLowerCase() === ext);
+    
+    if (isCodeFile) {
+        // 对于代码文件，清理注释和解释文字
+        const cleanedCode = cleanAICodeResponse(code, language, true, true); // 启用删除中文注释和纯净代码提取
+        finalCode = cleanCodeBlockMarkers(cleanedCode.cleanedCode);
+    } else {
+        // 对于txt和md文件，保留原始内容，只清理代码块标记，不删除中文内容
+        finalCode = cleanCodeBlockMarkersForText(code);
+    }
 
     // 写入文件
     await vscode.workspace.fs.writeFile(fileUri, Buffer.from(finalCode, 'utf8'));
@@ -1608,6 +1620,36 @@ async function fileExists(filePath: string): Promise<boolean> {
     } catch {
         return false;
     }
+}
+
+/**
+ * 清理代码块标识符（专门用于文本文件，保留所有内容）
+ * @param content 文件内容
+ * @returns 清理后的内容
+ */
+function cleanCodeBlockMarkersForText(content: string): string {
+    if (!content || typeof content !== 'string') {
+        return content;
+    }
+
+    const lines = content.split('\n');
+    const cleanedLines: string[] = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+        
+        // 只跳过代码块开始和结束标记
+        if (trimmedLine.startsWith('```') && trimmedLine.length <= 20) {
+            // 这是代码块标记，跳过这一行
+            continue;
+        }
+        
+        // 保留所有其他内容，包括中文
+        cleanedLines.push(line);
+    }
+    
+    return cleanedLines.join('\n');
 }
 
 /**
