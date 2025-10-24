@@ -1858,17 +1858,38 @@ class ChatPanel {
             }
             
             if (msg?.type === 'addContext') {
-                // 获取最近打开的文件编辑器
+                // 获取最近打开的文件编辑器（包括文本文件和图片文件）
                 const recentFiles = vscode.window.tabGroups.all
                     .flatMap(tabGroup => tabGroup.tabs)
-                    .filter(tab => tab.input instanceof vscode.TabInputText)
-                    .map(tab => ({
-                        label: (tab.input as vscode.TabInputText).uri.fsPath.split(/[\\/]/).pop() || '',
-                        description: (tab.input as vscode.TabInputText).uri.fsPath,
-                        uri: (tab.input as vscode.TabInputText).uri,
-                        type: 'file'
-                    }))
-                    .filter(file => file.label)
+                    .filter(tab => {
+                        // 包含文本文件和图片文件
+                        return tab.input instanceof vscode.TabInputText || 
+                               (tab.input instanceof vscode.TabInputCustom && 
+                                tab.input.uri && 
+                                /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(tab.input.uri.fsPath));
+                    })
+                    .map(tab => {
+                        let uri: vscode.Uri;
+                        let fileName: string;
+                        
+                        if (tab.input instanceof vscode.TabInputText) {
+                            uri = tab.input.uri;
+                            fileName = uri.fsPath.split(/[\\/]/).pop() || '';
+                        } else if (tab.input instanceof vscode.TabInputCustom) {
+                            uri = tab.input.uri;
+                            fileName = uri.fsPath.split(/[\\/]/).pop() || '';
+                        } else {
+                            return null;
+                        }
+                        
+                        return {
+                            label: fileName,
+                            description: uri.fsPath,
+                            uri: uri,
+                            type: /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(fileName) ? 'image' : 'file'
+                        };
+                    })
+                    .filter(file => file !== null && file.label)
                     .slice(0, 10); // 限制显示最多10个文件
                 
                 // 添加其他上下文类型
@@ -3328,8 +3349,10 @@ ${userText ? `问题: ${userText}` : ''}`;
                     if (category.type === 'file' && hasItems) {
                         html += '<div class="context-items">';
                         category.items.forEach(item => {
-                            html += '<div class="context-item" data-type="' + category.type + '" data-path="' + item.description + '" data-name="' + item.label + '">' +
-                                item.label + 
+                            // 根据文件类型显示不同的图标
+                            const icon = item.type === 'image' ? '🖼️' : '📄';
+                            html += '<div class="context-item" data-type="' + category.type + '" data-path="' + item.description + '" data-name="' + item.label + '" data-file-type="' + (item.type || 'file') + '">' +
+                                icon + ' ' + item.label + 
                                 '</div>';
                         });
                         html += '</div>';
@@ -3344,7 +3367,9 @@ ${userText ? `问题: ${userText}` : ''}`;
                         const contextType = item.dataset.type;
                         const filePath = item.dataset.path;
                         const fileName = item.dataset.name;
-                        vscode.postMessage({ type: 'selectContext', contextType, filePath, fileName });
+                        const fileType = item.dataset.fileType || 'file';
+                        console.log('点击文件项:', { contextType, filePath, fileName, fileType });
+                        vscode.postMessage({ type: 'selectContext', contextType, filePath, fileName, fileType });
                         filePanelEl.style.display = 'none';
                     });
                 });
@@ -3893,16 +3918,37 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleAddContext() {
-        // 获取最近打开的文件
+        // 获取最近打开的文件（包括文本文件和图片文件）
         const recentFiles = vscode.window.tabGroups.all
             .flatMap(tabGroup => tabGroup.tabs)
-            .filter(tab => tab.input instanceof vscode.TabInputText)
-            .map(tab => ({
-                label: (tab.input as vscode.TabInputText).uri.fsPath.split(/[\\/]/).pop() || '',
-                description: (tab.input as vscode.TabInputText).uri.fsPath,
-                type: 'file'
-            }))
-            .filter(file => file.label)
+            .filter(tab => {
+                // 包含文本文件和图片文件
+                return tab.input instanceof vscode.TabInputText || 
+                       (tab.input instanceof vscode.TabInputCustom && 
+                        tab.input.uri && 
+                        /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(tab.input.uri.fsPath));
+            })
+            .map(tab => {
+                let uri: vscode.Uri;
+                let fileName: string;
+                
+                if (tab.input instanceof vscode.TabInputText) {
+                    uri = tab.input.uri;
+                    fileName = uri.fsPath.split(/[\\/]/).pop() || '';
+                } else if (tab.input instanceof vscode.TabInputCustom) {
+                    uri = tab.input.uri;
+                    fileName = uri.fsPath.split(/[\\/]/).pop() || '';
+                } else {
+                    return null;
+                }
+                
+                return {
+                    label: fileName,
+                    description: uri.fsPath,
+                    type: /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(fileName) ? 'image' : 'file'
+                };
+            })
+            .filter(file => file !== null && file.label)
             .slice(0, 10);
         
         // 发送文件列表到webview
@@ -6031,11 +6077,13 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     
                     function showContextPanel(contextItems) {
                         const items = contextItems[0]?.items || [];
-                        filePanel.innerHTML = items.map(item => 
-                            '<div class="file-item" data-path="' + item.description + '" data-name="' + item.label + '">' +
-                                '📄 ' + item.label +
-                             '</div>'
-                        ).join('');
+                        filePanel.innerHTML = items.map(item => {
+                            // 根据文件类型显示不同的图标
+                            const icon = item.type === 'image' ? '🖼️' : '📄';
+                            return '<div class="file-item" data-path="' + item.description + '" data-name="' + item.label + '" data-type="' + (item.type || 'file') + '">' +
+                                icon + ' ' + item.label +
+                             '</div>';
+                        }).join('');
                         
                         // 为每个文件项添加点击事件
                         filePanel.querySelectorAll('.file-item').forEach(item => {
