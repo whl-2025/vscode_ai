@@ -220,13 +220,25 @@ export class ProjectDatabase {
      */
     private readData(filePath: string): any {
         try {
+            console.log(`ProjectDatabase: 尝试读取文件: ${filePath}`);
+            console.log(`ProjectDatabase: 文件是否存在: ${fs.existsSync(filePath)}`);
+            
             if (fs.existsSync(filePath)) {
                 const data = fs.readFileSync(filePath, 'utf8');
-                return JSON.parse(data);
+                console.log(`ProjectDatabase: 文件内容长度: ${data.length}`);
+                console.log(`ProjectDatabase: 文件内容预览: ${data.substring(0, 200)}...`);
+                
+                const parsed = JSON.parse(data);
+                console.log(`ProjectDatabase: 解析后的数据类型: ${Array.isArray(parsed) ? 'Array' : typeof parsed}`);
+                console.log(`ProjectDatabase: 解析后的数据长度: ${Array.isArray(parsed) ? parsed.length : 'N/A'}`);
+                
+                return parsed;
+            } else {
+                console.log(`ProjectDatabase: 文件不存在，返回空数组`);
+                return [];
             }
-            return [];
         } catch (error) {
-            console.error(`Error reading ${filePath}:`, error);
+            console.error(`ProjectDatabase: 读取文件失败 ${filePath}:`, error);
             return [];
         }
     }
@@ -280,15 +292,25 @@ export class ProjectDatabase {
      * 获取所有聊天会话
      */
     async getChatSessions(): Promise<ChatSession[]> {
+        console.log('ProjectDatabase: 获取聊天会话...');
+        console.log('ProjectDatabase: 使用SQLite:', this.useSQLite);
+        console.log('ProjectDatabase: 会话文件路径:', this.sessionsPath);
+        
         if (this.useSQLite) {
             const stmt = this.db.prepare('SELECT * FROM chat_sessions ORDER BY created_at DESC');
             return stmt.all();
         } else {
             // 分文件存储
+            console.log('ProjectDatabase: 读取会话文件...');
             const sessions = this.readData(this.sessionsPath);
-            return sessions.sort((a: ChatSession, b: ChatSession) => 
+            console.log('ProjectDatabase: 原始会话数据:', sessions);
+            
+            const sortedSessions = sessions.sort((a: ChatSession, b: ChatSession) => 
                 new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
             );
+            console.log('ProjectDatabase: 排序后的会话数据:', sortedSessions);
+            
+            return sortedSessions;
         }
     }
 

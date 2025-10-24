@@ -72,7 +72,6 @@ function log(level: LogLevel, message: string, details?: unknown) {
 function getConfiguration() {
     const config = vscode.workspace.getConfiguration('ccdcCodeGen');
     const promptManager = PromptManager.getInstance();
-    const promptConfig = PromptManager.createConfigFromVSCode();
     
     return {
         baseUrl: config.get<string>('baseUrl', 'https://gpt.ccdc.com.cn'),
@@ -80,21 +79,13 @@ function getConfiguration() {
         model: config.get<string>('model', 'gpt-3.5-turbo'),
         temperature: config.get<number>('temperature', 0.1),
         maxTokens: config.get<number>('maxTokens', 2048),
-        systemPrompt: config.get<string>('systemPrompt', ''), // 原始的自定义系统提示词
-        builtSystemPrompt: promptManager.buildSystemPrompt(promptConfig), // 构建后的完整系统提示词
-        stream: config.get<boolean>('stream', false),
+        builtSystemPrompt: promptManager.buildSystemPrompt({}), // 构建后的完整系统提示词
         timeoutMs: config.get<number>('timeoutMs', 120000),
         logLevel: (config.get<string>('logLevel', 'info') as LogLevel) || 'info',
         useDatabase: config.get<boolean>('useDatabase', true),
         maxHistoryDays: config.get<number>('maxHistoryDays', 30),
         autoSaveGenerated: config.get<boolean>('autoSaveGenerated', true),
         storageStrategy: (config.get<string>('storageStrategy', 'workspace') as 'workspace' | 'global') || 'workspace',
-        // 新增的提示词相关配置
-        promptMode: promptConfig.promptMode,
-        enableToolInstructions: promptConfig.enableToolInstructions,
-        enableCodingBestPractices: promptConfig.enableCodingBestPractices,
-        enableChineseInstructions: promptConfig.enableChineseInstructions,
-        fastMode: promptConfig.fastMode,
     };
 }
 
@@ -120,7 +111,7 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
         messages: messages,
         temperature: cfg.temperature,
         max_tokens: cfg.maxTokens,
-        stream: cfg.stream,
+        stream: true,
     });
 
     const isHttps = url.protocol === 'https:';
@@ -128,7 +119,7 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
 
     return new Promise<string>((resolve, reject) => {
         const started = Date.now();
-        log('info', 'POST /v1/chat/completions', { url: url.toString(), model: cfg.model, stream: cfg.stream });
+        log('info', 'POST /v1/chat/completions', { url: url.toString(), model: cfg.model });
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload).toString(),
@@ -150,52 +141,63 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
             },
             (res) => {
                 if (res.statusCode && res.statusCode >= 400) {
-                    const err = new Error(`OpenAI HTTP ${res.statusCode}`);
-                    log('info', 'OpenAI error response', { status: res.statusCode });
-                    reject(err);
+                    let errorMessage = `OpenAI HTTP ${res.statusCode}`;
+                    let errorDetails = '';
+                    
+                    // 处理特定的HTTP状态码
+                    if (res.statusCode === 401) {
+                        errorMessage = 'API认证失败 (401 Unauthorized)';
+                        errorDetails = '请检查API Key是否正确，或是否已过期';
+                    } else if (res.statusCode === 403) {
+                        errorMessage = 'API访问被拒绝 (403 Forbidden)';
+                        errorDetails = '可能原因：账户余额不足、权限不足、地区限制或服务被禁用';
+                    } else if (res.statusCode === 429) {
+                        errorMessage = '请求频率超限 (429 Too Many Requests)';
+                        errorDetails = '请稍后重试，或检查请求频率限制';
+                    } else if (res.statusCode === 500) {
+                        errorMessage = '服务器内部错误 (500 Internal Server Error)';
+                        errorDetails = '服务器暂时不可用，请稍后重试';
+                    }
+                    
+                    log('info', 'OpenAI API错误', { 
+                        status: res.statusCode, 
+                        message: errorMessage,
+                        details: errorDetails,
+                        url: url.toString(),
+                        hasApiKey: !!cfg.apiKey
+                    });
+                    
+                    const fullError = new Error(`${errorMessage}${errorDetails ? ': ' + errorDetails : ''}`);
+                    reject(fullError);
                     return;
                 }
 
-                const chunks: Buffer[] = [];
-                res.on('data', (d: Buffer) => chunks.push(d));
-                res.on('end', () => {
-                    try {
-                        const raw = Buffer.concat(chunks).toString('utf8');
-                        if (cfg.stream) {
-                            // streaming mode returns NDJSON, combine responses
-                            const lines = raw
-                                .split(/\r?\n/) 
-                                .filter(Boolean);
-                            const texts: string[] = [];
-                            for (const line of lines) {
-                                try {
-                                    if (line.startsWith('data: ')) {
-                                        const data = line.substring(6);
-                                        if (data === '[DONE]') {
-                                            continue;
-                                        }
-                                        const obj = JSON.parse(data) as OpenAIChatResponse;
-                                        if (obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content) {
-                                            texts.push(obj.choices[0].delta.content);
-                                        }
-                                    }
-                                } catch {
-                                    // ignore bad lines
+                // 流式处理响应
+                let full = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk: string) => {
+                    const lines = chunk.split(/\r?\n/).filter(Boolean);
+                    for (const line of lines) {
+                        try {
+                            if (line.startsWith('data: ')) {
+                                const data = line.substring(6);
+                                if (data === '[DONE]') {
+                                    continue;
+                                }
+                                const obj = JSON.parse(data) as OpenAIChatResponse;
+                                const piece: string | undefined = obj?.choices?.[0]?.delta?.content;
+                                if (piece) {
+                                    full += piece;
                                 }
                             }
-                            const final = texts.join('');
-                            log('debug', 'OpenAI streamed response (combined)', { ms: Date.now() - started, bytes: raw.length, length: final.length });
-                            resolve(final);
-                            return;
+                        } catch {
+                            // 忽略解析错误的行
                         }
-                        const obj = JSON.parse(raw) as OpenAIResponse;
-                        const text = obj.choices && obj.choices[0] && obj.choices[0].message ? obj.choices[0].message.content : '';
-                        log('debug', 'OpenAI response', { ms: Date.now() - started, bytes: raw.length, length: text.length });
-                        resolve(text || '');
-                    } catch (e) {
-                        log('info', 'Failed to parse OpenAI response', { error: String((e as any)?.message || e) });
-                        reject(e);
                     }
+                });
+                res.on('end', () => {
+                    log('debug', 'OpenAI streamed response completed', { ms: Date.now() - started, length: full.length });
+                    resolve(full);
                 });
             }
         );
@@ -368,6 +370,495 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
     context.subscriptions.push(importHistoryCommand);
+
+    // 添加诊断命令
+    const diagnosticCommand = vscode.commands.registerCommand('ccdc.diagnostic', async () => {
+        try {
+            console.log('=== CCDC 扩展诊断信息 ===');
+            
+            // 检查VS Code工作区状态
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            const rootPath = vscode.workspace.rootPath;
+            console.log('工作区文件夹数量:', workspaceFolders?.length || 0);
+            console.log('工作区根路径:', rootPath);
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                console.log('第一个工作区路径:', workspaceFolders[0].uri.fsPath);
+            }
+            
+            // 检查当前项目
+            const currentProject = dbManager.getCurrentProject();
+            console.log('当前项目:', currentProject);
+            
+            // 检查存储路径
+            const storageUri = context.globalStorageUri;
+            console.log('存储URI:', storageUri.toString());
+            
+            // 检查文件系统访问权限
+            const fs = require('fs');
+            const path = require('path');
+            let storagePathExists = false;
+            let storagePathWritable = false;
+            let projectsDirExists = false;
+            let projectDirExists = false;
+            let projectDirPath = '';
+            
+            // 检查环境信息
+            console.log('操作系统:', process.platform);
+            console.log('Node.js版本:', process.version);
+            console.log('VS Code版本:', vscode.version);
+            console.log('当前工作目录:', process.cwd());
+            console.log('用户主目录:', require('os').homedir());
+            
+            try {
+                storagePathExists = fs.existsSync(storageUri.fsPath);
+                if (storagePathExists) {
+                    storagePathWritable = fs.accessSync(storageUri.fsPath, fs.constants.W_OK) === undefined;
+                }
+                
+                const projectsDir = path.join(storageUri.fsPath, 'projects');
+                projectsDirExists = fs.existsSync(projectsDir);
+                
+                if (currentProject) {
+                    projectDirPath = path.join(projectsDir, currentProject.project_name);
+                    projectDirExists = fs.existsSync(projectDirPath);
+                }
+            } catch (error) {
+                console.error('文件系统检查失败:', error);
+            }
+            
+            // 检查聊天会话
+            const sessions = await dbManager.getChatSessions();
+            console.log('聊天会话数量:', sessions.length);
+            console.log('聊天会话详情:', sessions);
+            
+            // 检查每个会话的消息
+            for (const session of sessions) {
+                const messages = await dbManager.getMessages(session.id);
+                console.log(`会话 ${session.title} 的消息数量:`, messages.length);
+            }
+            
+            // 显示诊断结果
+            const diagnosticInfo = {
+                currentProject: currentProject,
+                storageUri: storageUri.toString(),
+                storagePathExists: storagePathExists,
+                storagePathWritable: storagePathWritable,
+                projectsDirExists: projectsDirExists,
+                projectDirExists: projectDirExists,
+                projectDirPath: projectDirPath,
+                sessionsCount: sessions.length,
+                sessions: sessions.map(s => ({
+                    id: s.id,
+                    title: s.title,
+                    createdAt: s.created_at,
+                    updatedAt: s.updated_at
+                }))
+            };
+            
+            const panel = vscode.window.createWebviewPanel(
+                'ccdcDiagnostic',
+                'CCDC 诊断信息',
+                vscode.ViewColumn.One,
+                { enableScripts: true }
+            );
+            
+            panel.webview.html = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>CCDC 诊断信息</title>
+                    <style>
+                        body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #e5e5e5; }
+                        .section { margin: 20px 0; padding: 15px; border: 1px solid #333; border-radius: 5px; }
+                        .label { font-weight: bold; color: #4e94ce; }
+                        .value { margin-left: 10px; }
+                        .status { padding: 4px 8px; border-radius: 3px; font-size: 12px; }
+                        .success { background: #2d5a2d; color: #90ee90; }
+                        .error { background: #5a2d2d; color: #ff6b6b; }
+                        .warning { background: #5a4d2d; color: #ffd700; }
+                        pre { background: #2a2a2a; padding: 10px; border-radius: 3px; overflow-x: auto; }
+                    </style>
+                </head>
+                <body>
+                    <h1>CCDC 扩展诊断信息</h1>
+                    
+                    <div class="section">
+                        <div class="label">当前项目:</div>
+                        <div class="value">${currentProject ? JSON.stringify(currentProject, null, 2) : '无'}</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="label">存储路径:</div>
+                        <div class="value">${storageUri.toString()}</div>
+                        <div class="label">存储路径存在:</div>
+                        <span class="status ${storagePathExists ? 'success' : 'error'}">${storagePathExists ? '✓ 存在' : '✗ 不存在'}</span>
+                        <div class="label">存储路径可写:</div>
+                        <span class="status ${storagePathWritable ? 'success' : 'error'}">${storagePathWritable ? '✓ 可写' : '✗ 不可写'}</span>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="label">项目目录状态:</div>
+                        <div class="label">projects目录存在:</div>
+                        <span class="status ${projectsDirExists ? 'success' : 'error'}">${projectsDirExists ? '✓ 存在' : '✗ 不存在'}</span>
+                        <div class="label">当前项目目录存在:</div>
+                        <span class="status ${projectDirExists ? 'success' : 'error'}">${projectDirExists ? '✓ 存在' : '✗ 不存在'}</span>
+                        <div class="label">项目目录路径:</div>
+                        <div class="value">${projectDirPath || '无'}</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="label">聊天会话数量:</div>
+                        <div class="value">${sessions.length}</div>
+                    </div>
+                    
+                    <div class="section">
+                        <div class="label">完整诊断信息:</div>
+                        <pre>${JSON.stringify(diagnosticInfo, null, 2)}</pre>
+                    </div>
+                </body>
+                </html>
+            `;
+            
+            vscode.window.showInformationMessage('诊断信息已显示在面板中');
+        } catch (error) {
+            console.error('诊断失败:', error);
+            vscode.window.showErrorMessage(`诊断失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(diagnosticCommand);
+
+    // 添加创建存储目录的命令
+    const createStorageCommand = vscode.commands.registerCommand('ccdc.createStorage', async () => {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            
+            // 获取存储路径
+            const storageUri = context.globalStorageUri;
+            const storagePath = storageUri.fsPath;
+            
+            console.log('创建存储目录:', storagePath);
+            
+            // 创建主存储目录
+            if (!fs.existsSync(storagePath)) {
+                fs.mkdirSync(storagePath, { recursive: true });
+                console.log('主存储目录已创建');
+            }
+            
+            // 创建projects目录
+            const projectsDir = path.join(storagePath, 'projects');
+            if (!fs.existsSync(projectsDir)) {
+                fs.mkdirSync(projectsDir, { recursive: true });
+                console.log('projects目录已创建');
+            }
+            
+            // 获取当前项目，如果没有则创建一个默认项目
+            let currentProject = dbManager.getCurrentProject();
+            if (!currentProject) {
+                // 如果没有当前项目，创建一个默认项目
+                const defaultProjectPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || 
+                    vscode.workspace.rootPath || 
+                    process.cwd();
+                
+                console.log('没有当前项目，创建默认项目:', defaultProjectPath);
+                await dbManager.switchToProject(defaultProjectPath);
+                currentProject = dbManager.getCurrentProject();
+            }
+            
+            if (currentProject) {
+                const projectDir = path.join(projectsDir, currentProject.project_name);
+                if (!fs.existsSync(projectDir)) {
+                    fs.mkdirSync(projectDir, { recursive: true });
+                    console.log('项目目录已创建:', projectDir);
+                }
+                
+                // 初始化项目数据文件
+                const sessionsPath = path.join(projectDir, 'sessions.json');
+                const messagesPath = path.join(projectDir, 'messages.json');
+                const filesPath = path.join(projectDir, 'generated_files.json');
+                const contextPath = path.join(projectDir, 'context_files.json');
+                const statsPath = path.join(projectDir, 'stats.json');
+                
+                if (!fs.existsSync(sessionsPath)) {
+                    fs.writeFileSync(sessionsPath, JSON.stringify([], null, 2));
+                }
+                if (!fs.existsSync(messagesPath)) {
+                    fs.writeFileSync(messagesPath, JSON.stringify([], null, 2));
+                }
+                if (!fs.existsSync(filesPath)) {
+                    fs.writeFileSync(filesPath, JSON.stringify([], null, 2));
+                }
+                if (!fs.existsSync(contextPath)) {
+                    fs.writeFileSync(contextPath, JSON.stringify([], null, 2));
+                }
+                if (!fs.existsSync(statsPath)) {
+                    const statsData = {
+                        id: 1,
+                        total_sessions: 0,
+                        total_messages: 0,
+                        total_files: 0,
+                        language_stats: '{}',
+                        last_updated: new Date().toISOString()
+                    };
+                    fs.writeFileSync(statsPath, JSON.stringify(statsData, null, 2));
+                }
+                
+                console.log('项目数据文件已初始化');
+            } else {
+                console.log('无法创建项目，请确保VS Code已打开工作区');
+                vscode.window.showWarningMessage('无法创建项目，请确保VS Code已打开工作区');
+                return;
+            }
+            
+            vscode.window.showInformationMessage('存储目录创建成功！');
+            
+            // 重新加载聊天历史
+            vscode.window.showInformationMessage('请重新打开聊天面板以加载历史数据');
+            
+        } catch (error) {
+            console.error('创建存储目录失败:', error);
+            vscode.window.showErrorMessage(`创建存储目录失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(createStorageCommand);
+
+    // 创建VS Code目录结构的辅助函数
+    async function createVSCodeDirectories(): Promise<string> {
+        const fs = require('fs');
+        const path = require('path');
+        
+        const basePath = require('os').homedir();
+        const appDataPath = path.join(basePath, 'AppData', 'Roaming');
+        
+        console.log('检查AppData路径:', appDataPath);
+        
+        // 创建完整的VS Code目录结构
+        const directories = [
+            'Code',
+            'Code\\User',
+            'Code\\User\\globalStorage',
+            'Code\\User\\workspaceStorage',
+            'Code\\User\\settings',
+            'Code\\User\\keybindings',
+            'Code\\User\\snippets'
+        ];
+        
+        for (const dir of directories) {
+            const fullPath = path.join(appDataPath, dir);
+            if (!fs.existsSync(fullPath)) {
+                try {
+                    fs.mkdirSync(fullPath, { recursive: true });
+                    console.log('创建目录:', fullPath);
+                } catch (error) {
+                    console.error('创建目录失败:', fullPath, error);
+                }
+            }
+        }
+        
+        // 创建扩展专用目录
+        const extensionDir = path.join(appDataPath, 'Code', 'User', 'globalStorage', 'ccdc-lab.gpt-ccdc');
+        if (!fs.existsSync(extensionDir)) {
+            try {
+                fs.mkdirSync(extensionDir, { recursive: true });
+                console.log('创建扩展目录:', extensionDir);
+            } catch (error) {
+                console.error('创建扩展目录失败:', extensionDir, error);
+            }
+        }
+        
+        return extensionDir;
+    }
+
+    // 获取替代存储路径的辅助函数
+    async function getAlternativeStoragePath(): Promise<string> {
+        const fs = require('fs');
+        const path = require('path');
+        
+        // 尝试创建VS Code目录结构
+        try {
+            const vsCodePath = await createVSCodeDirectories();
+            console.log('VS Code目录结构创建成功:', vsCodePath);
+            return vsCodePath;
+        } catch (error) {
+            console.log('VS Code目录创建失败，使用替代路径:', error);
+            
+            // 使用用户主目录下的替代路径
+            const homeDir = require('os').homedir();
+            const alternativePath = path.join(homeDir, '.ccdc-storage');
+            
+            if (!fs.existsSync(alternativePath)) {
+                fs.mkdirSync(alternativePath, { recursive: true });
+                console.log('创建替代存储路径:', alternativePath);
+            }
+            
+            return alternativePath;
+        }
+    }
+
+    // 添加内网环境修复命令
+    const fixIntranetCommand = vscode.commands.registerCommand('ccdc.fixIntranet', async () => {
+        try {
+            console.log('=== 内网环境修复 ===');
+            
+            // 检查当前存储路径状态
+            const fs = require('fs');
+            const path = require('path');
+            const storageUri = context.globalStorageUri;
+            const standardStoragePath = storageUri.fsPath;
+            
+            console.log('标准存储路径:', standardStoragePath);
+            console.log('标准存储路径是否存在:', fs.existsSync(standardStoragePath));
+            
+            // 如果标准存储路径不存在，创建VS Code目录结构
+            let actualStoragePath = standardStoragePath;
+            if (!fs.existsSync(standardStoragePath)) {
+                console.log('标准存储路径不存在，尝试创建VS Code目录结构');
+                actualStoragePath = await getAlternativeStoragePath();
+                console.log('实际使用的存储路径:', actualStoragePath);
+            }
+            
+            // 强制重新初始化项目
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            const rootPath = vscode.workspace.rootPath;
+            
+            let projectPath = '';
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                projectPath = workspaceFolders[0].uri.fsPath;
+            } else if (rootPath) {
+                projectPath = rootPath;
+            } else {
+                projectPath = process.cwd();
+            }
+            
+            console.log('使用项目路径:', projectPath);
+            
+            // 强制切换到项目
+            const switchResult = await dbManager.switchToProject(projectPath);
+            console.log('项目切换结果:', switchResult);
+            
+            // 检查项目状态
+            let currentProject = dbManager.getCurrentProject();
+            console.log('当前项目状态:', currentProject);
+            
+            // 如果项目切换失败，手动创建项目
+            if (!currentProject) {
+                console.log('项目切换失败，手动创建项目');
+                
+                // 手动创建项目信息
+                const projectName = path.basename(projectPath) || 'default-project';
+                const projectsDir = path.join(actualStoragePath, 'projects');
+                const projectDir = path.join(projectsDir, projectName);
+                
+                // 确保目录存在
+                if (!fs.existsSync(projectsDir)) {
+                    fs.mkdirSync(projectsDir, { recursive: true });
+                    console.log('创建projects目录:', projectsDir);
+                }
+                
+                if (!fs.existsSync(projectDir)) {
+                    fs.mkdirSync(projectDir, { recursive: true });
+                    console.log('创建项目目录:', projectDir);
+                }
+                
+                // 初始化数据文件
+                const dataFiles = [
+                    { name: 'sessions.json', content: [] },
+                    { name: 'messages.json', content: [] },
+                    { name: 'generated_files.json', content: [] },
+                    { name: 'context_files.json', content: [] },
+                    { 
+                        name: 'stats.json', 
+                        content: {
+                            id: 1,
+                            total_sessions: 0,
+                            total_messages: 0,
+                            total_files: 0,
+                            language_stats: '{}',
+                            last_updated: new Date().toISOString()
+                        }
+                    }
+                ];
+                
+                for (const file of dataFiles) {
+                    const filePath = path.join(projectDir, file.name);
+                    if (!fs.existsSync(filePath)) {
+                        fs.writeFileSync(filePath, JSON.stringify(file.content, null, 2));
+                        console.log('创建文件:', file.name);
+                    }
+                }
+                
+                // 再次尝试切换项目
+                const retryResult = await dbManager.switchToProject(projectPath);
+                console.log('重试项目切换结果:', retryResult);
+                currentProject = dbManager.getCurrentProject();
+                console.log('重试后项目状态:', currentProject);
+            }
+            
+            if (currentProject) {
+                vscode.window.showInformationMessage(`内网环境修复完成！项目: ${currentProject.project_name}，存储路径: ${actualStoragePath}`);
+                console.log('修复成功，项目信息:', currentProject);
+            } else {
+                vscode.window.showWarningMessage('项目创建部分成功，但项目状态仍为null。请重新打开聊天面板尝试。');
+                console.log('项目状态仍为null，但文件已创建');
+            }
+            
+        } catch (error) {
+            console.error('内网环境修复失败:', error);
+            vscode.window.showErrorMessage(`内网环境修复失败: ${error}`);
+        }
+    });
+    context.subscriptions.push(fixIntranetCommand);
+
+    // 添加API连接测试命令
+    const testApiCommand = vscode.commands.registerCommand('ccdc.testApi', async () => {
+        try {
+            console.log('=== API连接测试 ===');
+            
+            const cfg = getConfiguration();
+            console.log('API配置:', {
+                baseUrl: cfg.baseUrl,
+                model: cfg.model,
+                hasApiKey: !!cfg.apiKey,
+                apiKeyLength: cfg.apiKey ? cfg.apiKey.length : 0,
+                timeout: cfg.timeoutMs
+            });
+            
+            // 测试简单的API调用
+            const testMessages = [
+                { role: 'user' as const, content: 'Hello, this is a test message.' }
+            ];
+            
+            vscode.window.showInformationMessage('正在测试API连接...');
+            
+            const response = await callOpenAIChat(testMessages, new AbortController().signal);
+            
+            if (response && response.length > 0) {
+                vscode.window.showInformationMessage(`API连接成功！响应长度: ${response.length} 字符`);
+                console.log('API测试成功:', { responseLength: response.length });
+            } else {
+                vscode.window.showWarningMessage('API连接成功，但响应为空');
+            }
+            
+        } catch (error: any) {
+            console.error('API测试失败:', error);
+            
+            let errorMessage = 'API连接测试失败';
+            if (error.message.includes('401')) {
+                errorMessage = 'API认证失败 - 请检查API Key是否正确';
+            } else if (error.message.includes('403')) {
+                errorMessage = 'API访问被拒绝 - 请检查账户状态和权限';
+            } else if (error.message.includes('429')) {
+                errorMessage = '请求频率超限 - 请稍后重试';
+            } else if (error.message.includes('500')) {
+                errorMessage = '服务器错误 - 请稍后重试';
+            } else if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
+                errorMessage = '网络连接失败 - 请检查网络和API地址';
+            }
+            
+            vscode.window.showErrorMessage(`${errorMessage}: ${error.message}`);
+        }
+    });
+    context.subscriptions.push(testApiCommand);
 
     const clearHistoryCommand = vscode.commands.registerCommand('ccdc.clearHistory', async () => {
         const result = await vscode.window.showWarningMessage(
@@ -562,13 +1053,6 @@ class ConfigurationPanel {
                     await config.update('model', msg.config.model, vscode.ConfigurationTarget.Global);
                     await config.update('temperature', msg.config.temperature, vscode.ConfigurationTarget.Global);
                     await config.update('maxTokens', msg.config.maxTokens, vscode.ConfigurationTarget.Global);
-                    await config.update('promptMode', msg.config.promptMode, vscode.ConfigurationTarget.Global);
-                    await config.update('enableToolInstructions', msg.config.enableToolInstructions, vscode.ConfigurationTarget.Global);
-                    await config.update('enableCodingBestPractices', msg.config.enableCodingBestPractices, vscode.ConfigurationTarget.Global);
-                    await config.update('enableChineseInstructions', msg.config.enableChineseInstructions, vscode.ConfigurationTarget.Global);
-                    await config.update('fastMode', msg.config.fastMode, vscode.ConfigurationTarget.Global);
-                    await config.update('systemPrompt', msg.config.systemPrompt, vscode.ConfigurationTarget.Global);
-                    await config.update('stream', msg.config.stream, vscode.ConfigurationTarget.Global);
                     await config.update('timeoutMs', msg.config.timeoutMs, vscode.ConfigurationTarget.Global);
                     await config.update('logLevel', msg.config.logLevel, vscode.ConfigurationTarget.Global);
                     
@@ -621,13 +1105,6 @@ class ConfigurationPanel {
                 model: cfg.model,
                 temperature: cfg.temperature,
                 maxTokens: cfg.maxTokens,
-                promptMode: cfg.promptMode,
-                enableToolInstructions: cfg.enableToolInstructions,
-                enableCodingBestPractices: cfg.enableCodingBestPractices,
-                enableChineseInstructions: cfg.enableChineseInstructions,
-                fastMode: cfg.fastMode,
-                systemPrompt: cfg.systemPrompt,
-                stream: cfg.stream,
                 timeoutMs: cfg.timeoutMs,
                 logLevel: cfg.logLevel
             })};
@@ -638,13 +1115,6 @@ class ConfigurationPanel {
             document.getElementById('model').value = config.model;
             document.getElementById('temperature').value = config.temperature;
             document.getElementById('maxTokens').value = config.maxTokens;
-            document.getElementById('promptMode').value = config.promptMode || 'enhanced';
-            document.getElementById('enableToolInstructions').checked = config.enableToolInstructions !== false;
-            document.getElementById('enableCodingBestPractices').checked = config.enableCodingBestPractices !== false;
-            document.getElementById('enableChineseInstructions').checked = config.enableChineseInstructions !== false;
-            document.getElementById('fastMode').checked = config.fastMode || false;
-            document.getElementById('systemPrompt').value = config.systemPrompt || '';
-            document.getElementById('stream').checked = config.stream;
             document.getElementById('timeoutMs').value = config.timeoutMs;
             document.getElementById('logLevel').value = config.logLevel;
             
@@ -655,13 +1125,6 @@ class ConfigurationPanel {
                     model: document.getElementById('model').value,
                     temperature: parseFloat(document.getElementById('temperature').value),
                     maxTokens: parseInt(document.getElementById('maxTokens').value),
-                    promptMode: document.getElementById('promptMode').value,
-                    enableToolInstructions: document.getElementById('enableToolInstructions').checked,
-                    enableCodingBestPractices: document.getElementById('enableCodingBestPractices').checked,
-                    enableChineseInstructions: document.getElementById('enableChineseInstructions').checked,
-                    fastMode: document.getElementById('fastMode').checked,
-                    systemPrompt: document.getElementById('systemPrompt').value,
-                    stream: document.getElementById('stream').checked,
                     timeoutMs: parseInt(document.getElementById('timeoutMs').value),
                     logLevel: document.getElementById('logLevel').value
                 };
@@ -675,13 +1138,6 @@ class ConfigurationPanel {
                 document.getElementById('model').value = config.model;
                 document.getElementById('temperature').value = config.temperature;
                 document.getElementById('maxTokens').value = config.maxTokens;
-                document.getElementById('promptMode').value = config.promptMode || 'enhanced';
-                document.getElementById('enableToolInstructions').checked = config.enableToolInstructions !== false;
-                document.getElementById('enableCodingBestPractices').checked = config.enableCodingBestPractices !== false;
-                document.getElementById('enableChineseInstructions').checked = config.enableChineseInstructions !== false;
-                document.getElementById('fastMode').checked = config.fastMode || false;
-                document.getElementById('systemPrompt').value = config.systemPrompt || '';
-                document.getElementById('stream').checked = config.stream;
                 document.getElementById('timeoutMs').value = config.timeoutMs;
                 document.getElementById('logLevel').value = config.logLevel;
             });
@@ -743,54 +1199,7 @@ class ConfigurationPanel {
                         <input type="number" id="maxTokens" min="1" placeholder="512">
                     </div>
                     
-                    <div class="form-group">
-                        <label for="promptMode">提示词模式:</label>
-                        <select id="promptMode">
-                            <option value="basic">基础模式</option>
-                            <option value="enhanced">增强模式</option>
-                        </select>
-                        <small>选择AI助手的行为模式</small>
-                    </div>
                     
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="enableToolInstructions"> 启用工具使用指导
-                        </label>
-                        <small>为AI提供详细的工具使用规范</small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="enableCodingBestPractices"> 启用编程最佳实践
-                        </label>
-                        <small>为AI提供代码编辑和文件操作的最佳实践指导</small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="enableChineseInstructions"> 启用中文特色指导
-                        </label>
-                        <small>保持原有的中文代码分析特色</small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="fastMode"> 🚀 快速模式
-                        </label>
-                        <small>启用后将使用精简的系统提示词，显著提高响应速度</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="systemPrompt">自定义系统提示词 (可选):</label>
-                        <textarea id="systemPrompt" placeholder="在这里添加您的自定义指令，将追加到自动生成的提示词后面..."></textarea>
-                        <small>此内容将追加到根据上述配置自动生成的系统提示词后面</small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="stream"> Enable Streaming
-                        </label>
-                    </div>
                     
                     <div class="form-group">
                         <label for="timeoutMs">Timeout (ms):</label>
@@ -798,7 +1207,7 @@ class ConfigurationPanel {
                     </div>
                     
                     <div class="form-group">
-                        <label for="systemPrompt">Log Level:</label>
+                        <label for="logLevel">Log Level:</label>
                         <select id="logLevel">
                             <option value="none">None</option>
                             <option value="info">Info</option>
@@ -831,9 +1240,9 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     const payload = JSON.stringify({
         model: cfg.model,
         messages: messages,
-        stream: cfg.stream,
         temperature: cfg.temperature,
         max_tokens: cfg.maxTokens,
+        stream: true,
     });
 
     const isHttps = url.protocol === 'https:';
@@ -856,51 +1265,62 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
             },
             (res) => {
                 if (res.statusCode && res.statusCode >= 400) {
-                    reject(new Error(`OpenAI HTTP ${res.statusCode}`));
+                    let errorMessage = `OpenAI HTTP ${res.statusCode}`;
+                    let errorDetails = '';
+                    
+                    // 处理特定的HTTP状态码
+                    if (res.statusCode === 401) {
+                        errorMessage = 'API认证失败 (401 Unauthorized)';
+                        errorDetails = '请检查API Key是否正确，或是否已过期';
+                    } else if (res.statusCode === 403) {
+                        errorMessage = 'API访问被拒绝 (403 Forbidden)';
+                        errorDetails = '可能原因：账户余额不足、权限不足、地区限制或服务被禁用';
+                    } else if (res.statusCode === 429) {
+                        errorMessage = '请求频率超限 (429 Too Many Requests)';
+                        errorDetails = '请稍后重试，或检查请求频率限制';
+                    } else if (res.statusCode === 500) {
+                        errorMessage = '服务器内部错误 (500 Internal Server Error)';
+                        errorDetails = '服务器暂时不可用，请稍后重试';
+                    }
+                    
+                    log('info', 'OpenAI Chat API错误', { 
+                        status: res.statusCode, 
+                        message: errorMessage,
+                        details: errorDetails,
+                        url: url.toString(),
+                        hasApiKey: !!cfg.apiKey
+                    });
+                    
+                    const fullError = new Error(`${errorMessage}${errorDetails ? ': ' + errorDetails : ''}`);
+                    reject(fullError);
                     return;
                 }
 
-                if (cfg.stream) {
-                    let full = '';
-                    res.setEncoding('utf8');
-                    res.on('data', (chunk: string) => {
-                        const lines = chunk.split(/\r?\n/).filter(Boolean);
-                        for (const line of lines) {
-                            try {
-                                if (line.startsWith('data: ')) {
-                                    const data = line.substring(6);
-                                    if (data === '[DONE]') {
-                                        continue;
-                                    }
-                                    const obj = JSON.parse(data) as OpenAIChatResponse;
-                                    const piece: string | undefined = obj?.choices?.[0]?.delta?.content;
-                                    if (piece) {
-                                        full += piece;
-                                        onChunk?.(piece);
-                                    }
-                                }
-                                // do not early resolve; wait for 'end'
-                            } catch {
-                                // ignore bad lines
-                            }
-                        }
-                    });
-                    res.on('end', () => resolve(full));
-                } else {
-                    const chunks: Buffer[] = [];
-                    res.on('data', (d: Buffer) => chunks.push(d));
-                    res.on('end', () => {
+                // 流式处理响应
+                let full = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk: string) => {
+                    const lines = chunk.split(/\r?\n/).filter(Boolean);
+                    for (const line of lines) {
                         try {
-                            const raw = Buffer.concat(chunks).toString('utf8');
-                            // Non-streaming chat: OpenAI returns a single JSON
-                            const obj = JSON.parse(raw) as OpenAIResponse;
-                            const text = obj?.choices?.[0]?.message?.content ?? '';
-                            resolve(text);
-                        } catch (e) {
-                            reject(e);
+                            if (line.startsWith('data: ')) {
+                                const data = line.substring(6);
+                                if (data === '[DONE]') {
+                                    continue;
+                                }
+                                const obj = JSON.parse(data) as OpenAIChatResponse;
+                                const piece: string | undefined = obj?.choices?.[0]?.delta?.content;
+                                if (piece) {
+                                    full += piece;
+                                    onChunk?.(piece);
+                                }
+                            }
+                        } catch {
+                            // 忽略解析错误的行
                         }
-                    });
-                }
+                    }
+                });
+                res.on('end', () => resolve(full));
             }
         );
 
@@ -1469,11 +1889,23 @@ class ChatPanel {
                 try {
                     let content = '';
                     let fileName = '';
+                    let isImage = false;
                     
                     if (msg.contextType === 'file') {
-                        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.filePath));
-                        content = document.getText();
                         fileName = msg.filePath.split(/[\\/]/).pop() || '';
+                        const fileExt = fileName.split('.').pop()?.toLowerCase();
+                        
+                        // 检查是否为图片文件
+                        if (fileExt && ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt)) {
+                            isImage = true;
+                            // 读取图片文件为Base64
+                            const fileData = await vscode.workspace.fs.readFile(vscode.Uri.file(msg.filePath));
+                            content = Buffer.from(fileData).toString('base64');
+                        } else {
+                            // 读取文本文件
+                            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.filePath));
+                            content = document.getText();
+                        }
                     }
                     
                     // 后台读取内容并传递给前端，供模型使用
@@ -1483,7 +1915,8 @@ class ChatPanel {
                         fileName: fileName,
                         filePath: msg.filePath,
                         content: content, // 新增：提供文件内容给前端
-                        hasContent: !!content
+                        hasContent: !!content,
+                        isImage: isImage // 新增：标记是否为图片
                     });
                 } catch (err) {
                     vscode.window.showErrorMessage(`无法读取文件: ${err}`);
@@ -1491,8 +1924,8 @@ class ChatPanel {
                 return;
             }
             
-            // 修复：允许没有text但有fileContent的情况
-            if (msg?.type === 'send' && (typeof msg.text === 'string' || msg.fileContent)) {
+            // 修复：允许没有text但有fileContent(包括空字符串) 的情况
+            if (msg?.type === 'send' && (typeof msg.text === 'string' || Object.prototype.hasOwnProperty.call(msg, 'fileContent'))) {
                 const cfg = getConfiguration();
                 
                 // 检测编辑意图
@@ -1504,14 +1937,14 @@ class ChatPanel {
                     hasFileContent: !!(msg.fileContent && msg.fileName)
                 });
                 
-                // 验证文件内容是否有效
+                // 处理空文件内容 - 允许发送但给出提示
                 if (msg.fileContent && msg.fileContent.trim().length === 0) {
                     log('info', '收到空文件内容', { fileName: msg.fileName });
+                    // 不阻止发送，但给出提示
                     this._panel.webview.postMessage({ 
-                        type: 'error', 
-                        text: '文件内容为空，请选择其他文件' 
+                        type: 'info', 
+                        text: '注意：文件内容为空，将发送空文件进行分析' 
                     });
-                    return;
                 }
                 
                 // 验证文件名
@@ -1547,13 +1980,13 @@ class ChatPanel {
                 let userTextForModel = userText;
                 
                 // 确保至少有一种内容
-                if (!userText && !msg.fileContent) {
+                if (!userText && msg.fileContent === undefined) {
                     log('info', '收到send消息但既无text也无fileContent', { msg });
                     return;
                 }
                 
                 // 添加文件类型识别和针对性提示
-                if (msg.fileContent && msg.fileName) {
+                if (msg.fileContent !== undefined && msg.fileName) {
                     let fileTypeHint = '';
                     const fileExt = msg.fileName.split('.').pop()?.toLowerCase();
                     
@@ -1581,14 +2014,40 @@ class ChatPanel {
                         case 'markdown':
                             fileTypeHint = '这是一个Markdown文档，请分析其内容结构和文档信息。';
                             break;
+                        case 'jpg':
+                        case 'jpeg':
+                        case 'png':
+                        case 'gif':
+                        case 'bmp':
+                        case 'webp':
+                        case 'svg':
+                            fileTypeHint = '这是一张图片文件，请详细描述图片的内容、构图、色彩、风格和可能的用途。如果图片包含文字，请识别并转录文字内容。';
+                            break;
                         default:
                             fileTypeHint = '请分析这个文件的内容、结构和功能。';
                     }
                     
+                    // 检查是否为空文件
+                    const isEmptyFile = msg.fileContent.trim().length === 0;
+                    
                     // 根据编辑意图调整提示词
                     if (hasEditIntent) {
-                        // 编辑模式：要求模型直接输出修改后的完整文件内容
-                        userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请严格按照以下要求：
+                        if (isEmptyFile) {
+                            // 编辑模式：空文件，要求创建新文件
+                            userTextForModel = `请根据用户要求创建这个${fileExt}文件。请严格按照以下要求：
+
+1. 只输出完整的文件内容
+2. 不要使用任何代码块标记（如\`\`\`vue、\`\`\`等）
+3. 不要添加任何解释文字或注释
+4. 确保代码语法正确，包含所有必要的开始和结束标签
+5. 保持标准的文件格式和缩进
+
+用户要求：${userText}
+
+请直接输出完整的文件内容（仅代码，无其他内容）：`;
+                        } else {
+                            // 编辑模式：有内容的文件，要求编辑
+                            userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请严格按照以下要求：
 
 1. 只输出修改后的完整文件内容
 2. 不要使用任何代码块标记（如\`\`\`vue、\`\`\`等）
@@ -1602,25 +2061,36 @@ ${msg.fileContent}
 用户要求：${userText}
 
 请直接输出修改后的完整文件内容（仅代码，无其他内容）：`;
+                        }
                     } else {
-                        // 分析模式：保持原有逻辑
-                        userTextForModel = `分析这个${fileExt}文件:
+                        if (isEmptyFile) {
+                            // 分析模式：空文件
+                            userTextForModel = `分析这个空的${fileExt}文件:
+
+文件内容：<空文件>
+
+${userText ? `问题: ${userText}` : '请分析这个空文件的结构和可能的用途。'}`;
+                        } else {
+                            // 分析模式：有内容的文件
+                            userTextForModel = `分析这个${fileExt}文件:
 
 ${msg.fileContent}
 
 ${userText ? `问题: ${userText}` : ''}`;
+                        }
                     } 
                     
                     log('info', '构建文件分析提示', {
                         fileName: msg.fileName,
                         fileExt: fileExt || '未知',
                         contentLength: msg.fileContent.length,
+                        isEmptyFile: isEmptyFile,
                         originalQuestion: userText || '默认文件分析问题',
-                        hasContent: true
+                        hasContent: !isEmptyFile
                     });
                 } else {
                     log('info', '未收到文件内容，使用纯文本问题', {
-                        hasFileContent: false,
+                        hasFileContent: msg.fileContent !== undefined,
                         hasFileName: !!msg.fileName,
                         messageKeys: Object.keys(msg)
                     });
@@ -1632,7 +2102,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                     model: cfg.model, 
                     temperature: cfg.temperature, 
                     maxTokens: cfg.maxTokens,
-                    hasFileContent: !!(msg.fileContent && msg.fileName),
+                    hasFileContent: Object.prototype.hasOwnProperty.call(msg, 'fileContent') && !!msg.fileName,
                     messageLength: userTextForModel.length,
                     hasSystemPrompt: !!(system)
                 });
@@ -1658,8 +2128,28 @@ ${userText ? `问题: ${userText}` : ''}`;
                 });
                 
                 // 前端显示简洁的提示或原始问题
-                const displayText = msg.displayText || userText || `[📄 分析文件: ${msg.fileName}]`;
-                this._panel.webview.postMessage({ type: 'appendUser', text: displayText });
+                let displayText = msg.displayText || userText || `[📄 分析文件: ${msg.fileName}]`;
+                
+                // 特殊处理图片文件
+                if (msg.fileName && msg.fileContent) {
+                    const fileExt = msg.fileName.split('.').pop()?.toLowerCase();
+                    if (fileExt && ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt)) {
+                        displayText = `[🖼️ 图片文件: ${msg.fileName}] ${userText || '请分析这张图片'}`;
+                    } else {
+                        displayText = `[📄 文件: ${msg.fileName}] ${userText || '请分析这个文件'}`;
+                    }
+                }
+                
+                // 发送用户消息，包含文件信息
+                const messageData = { 
+                    type: 'appendUser', 
+                    text: displayText,
+                    fileInfo: msg.fileName && msg.fileContent ? {
+                        fileName: msg.fileName,
+                        fileContent: msg.fileContent
+                    } : null
+                };
+                this._panel.webview.postMessage(messageData);
 
                 currentController = new AbortController();
                 this._panel.onDidDispose(() => {
@@ -2138,6 +2628,7 @@ ${userText ? `问题: ${userText}` : ''}`;
             .assistant { background: #2a2a2a; }
             .system { background: #262626; color: var(--muted); }
             .input-container { position: relative; border-top:1px solid #333; padding:8px; }
+            .input-section { position: relative; }
             .loading-indicator {
                 display: none;
                 align-items: center;
@@ -2150,7 +2641,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                 font-size: 12px;
                 color: #cccccc;
                 position: absolute;
-                top: -50px;
+                top: -70px;
                 left: 0;
                 right: 0;
                 z-index: 1000;
@@ -2503,6 +2994,21 @@ ${userText ? `问题: ${userText}` : ''}`;
                 flex-direction: column;
                 gap: 4px;
             }
+            
+            /* 响应式设计 - 确保loading indicator在不同屏幕尺寸下正确显示 */
+            @media (max-width: 768px) {
+                .loading-indicator, .loading-indicators {
+                    top: -80px;
+                    font-size: 11px;
+                    padding: 6px 10px;
+                }
+            }
+            
+            @media (min-width: 1200px) {
+                .loading-indicator, .loading-indicators {
+                    top: -60px;
+                }
+            }
         `;
 
         const script = `
@@ -2665,10 +3171,19 @@ ${userText ? `问题: ${userText}` : ''}`;
                 }
             }
 
-            function append(role, text) {
+            function append(role, text, fileInfo = null) {
                 const el = document.createElement('div');
                 el.className = 'msg ' + role;
-                el.textContent = text;
+                
+                // 不单独显示文件信息，因为displayText已经包含了文件信息
+                
+                // 添加文本内容
+                if (text) {
+                    const textEl = document.createElement('div');
+                    textEl.textContent = text;
+                    el.appendChild(textEl);
+                }
+                
                 messagesEl.appendChild(el);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
                 return el;
@@ -2684,6 +3199,11 @@ ${userText ? `问题: ${userText}` : ''}`;
                 if (pauseBtnEl) {
                     pauseBtnEl.style.display = 'flex';
                 }
+                // 添加生成状态的CSS类
+                const messagesEl = document.querySelector('.messages');
+                if (messagesEl) {
+                    messagesEl.classList.add('generating');
+                }
                 isGenerating = true;
             }
 
@@ -2696,6 +3216,11 @@ ${userText ? `问题: ${userText}` : ''}`;
                 }
                 if (pauseBtnEl) {
                     pauseBtnEl.style.display = 'none';
+                }
+                // 移除生成状态的CSS类
+                const messagesEl = document.querySelector('.messages');
+                if (messagesEl) {
+                    messagesEl.classList.remove('generating');
                 }
                 isGenerating = false;
             }
@@ -2712,13 +3237,51 @@ ${userText ? `问题: ${userText}` : ''}`;
                 let fileContent = null;
                 let fileName = null;
                 let displayText = text; // 前端显示的文本
-                if (selectedContexts.length > 0) {
-                    const fileContext = selectedContexts.find(ctx => ctx.contextType === 'file' && ctx.content);
+                
+                // 优先处理直接复制粘贴的图片
+                console.log('sendMessage: 检查contextImages', {
+                    contextImagesLength: contextImages.length,
+                    contextImages: contextImages
+                });
+                
+                if (contextImages.length > 0) {
+                    const image = contextImages[0]; // 取第一张图片
+                    console.log('sendMessage: 处理粘贴的图片', {
+                        hasImage: !!image,
+                        hasData: !!image.data,
+                        imageName: image.name
+                    });
+                    
+                    if (image && image.data) {
+                        // 从data URL中提取Base64数据
+                        const base64Data = image.data.split(',')[1]; // 去掉 "data:image/xxx;base64," 前缀
+                        fileContent = base64Data;
+                        fileName = image.name || 'pasted-image.png';
+                        displayText = '[🖼️ 包含图片: ' + fileName + '] ' + text;
+                        
+                        console.log('发送粘贴的图片:', {
+                            fileName: fileName,
+                            hasData: !!image.data,
+                            dataLength: image.data.length,
+                            base64Length: base64Data.length,
+                            finalFileContent: !!fileContent,
+                            finalFileName: fileName
+                        });
+                    }
+                }
+                // 如果没有粘贴的图片，再处理通过"添加上下文"选择的文件
+                else if (selectedContexts.length > 0) {
+                    // 允许空内容文件：不再要求 ctx.content 必须为真
+                    const fileContext = selectedContexts.find(ctx => ctx.contextType === 'file');
                     if (fileContext) {
                         fileContent = fileContext.content;
                         fileName = fileContext.fileName;
                         // 在前端显示简洁的提示信息
-                        displayText = '[📄 包含文件: ' + fileName + '] ' + text;
+                        if (fileContext.isImage) {
+                            displayText = '[🖼️ 包含图片: ' + fileName + '] ' + text;
+                        } else {
+                            displayText = '[📄 包含文件: ' + fileName + '] ' + text;
+                        }
                     }
                 }
                 
@@ -2729,6 +3292,15 @@ ${userText ? `问题: ${userText}` : ''}`;
                 
                 inputEl.value = '';
                 showLoading();
+                
+                console.log('sendMessage: 最终发送的消息', {
+                    text: text,
+                    displayText: displayText,
+                    fileName: fileName,
+                    hasFileContent: !!fileContent,
+                    fileContentLength: fileContent ? fileContent.length : 0
+                });
+                
                 vscode.postMessage({ 
                     type: 'send', 
                     text: text, // 原始用户问题
@@ -2952,7 +3524,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                 
                 // 添加编辑后的内容预览
                 const preview = document.createElement('div');
-                preview.textContent = editedContent.substring(0, 200) + (editedContent.length > 200 ? '...' : '');
+                preview.textContent = editedContent; // 显示全部内容，不截断
                 preview.style.fontFamily = 'monospace';
                 preview.style.fontSize = '12px';
                 preview.style.color = '#cccccc';
@@ -2961,6 +3533,12 @@ ${userText ? `问题: ${userText}` : ''}`;
                 preview.style.background = '#2a2a2a';
                 preview.style.borderRadius = '4px';
                 preview.style.whiteSpace = 'pre-wrap';
+                preview.style.width = '100%'; // 确保宽度
+                preview.style.boxSizing = 'border-box'; // 包含边框和内边距
+                console.log('预览容器样式设置完成:', {
+                    contentLength: editedContent.length,
+                    autoHeight: true
+                });
                 editResultContainer.appendChild(preview);
                 
                 // 添加按钮容器
@@ -3043,7 +3621,7 @@ ${userText ? `问题: ${userText}` : ''}`;
             window.addEventListener('message', (event) => {
                 const msg = event.data || {};
                 if (msg.type === 'appendUser') {
-                    append('user', msg.text || '');
+                    append('user', msg.text || '', msg.fileInfo || null);
                     lastAssistantEl = append('assistant', '');
                     assemblingAssistant = true;
                 }
@@ -3090,7 +3668,8 @@ ${userText ? `问题: ${userText}` : ''}`;
                         fileName: msg.fileName,
                         filePath: msg.filePath,
                         content: msg.content, // 新增：存储文件内容
-                        hasContent: msg.hasContent
+                        hasContent: msg.hasContent,
+                        isImage: msg.isImage // 新增：标记是否为图片
                     });
                     
                     // 在按钮上显示选择的上下文数量和文件名
@@ -3189,7 +3768,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                         </div>
                     </div>
                     <div class="messages" id="messages"></div>
-                    <div class="input-container">
+                    <div class="input-container" style="position: relative;">
                         <div id="loading-indicator" class="loading-indicator" style="display: none;">
                             <div class="spinner"></div>
                             <span>正在生成回复...</span>
@@ -3269,8 +3848,8 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                     await this.handleAddImage(message);
                     break;
                 case 'send':
-                    // 修复：允许没有text但有fileContent的情况
-                    if (typeof message.text === 'string' || message.fileContent) {
+                    // 修复：允许没有text但有fileContent(包括空字符串) 的情况
+                    if (typeof message.text === 'string' || Object.prototype.hasOwnProperty.call(message, 'fileContent')) {
                         await this.handleSendMessage(message.text || '', message.fileContent, message.fileName, message.displayText);
                     } else {
                         log('info', 'ChatViewProvider: 收到send消息但既无text也无fileContent', { message });
@@ -3339,30 +3918,61 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleSelectContext(message: any) {
+        console.log('ChatViewProvider: handleSelectContext 收到消息', message);
         if (message.contextType === 'file' && message.filePath) {
             try {
-                // 读取文件内容
-                const document = await vscode.workspace.openTextDocument(vscode.Uri.file(message.filePath));
-                const content = document.getText();
                 const fileName = message.filePath.split(/[\\/]/).pop() || '';
+                const fileExt = fileName.split('.').pop()?.toLowerCase();
+                let content = '';
+                let isImage = false;
+                
+                console.log('ChatViewProvider: 开始处理文件', {
+                    fileName: fileName,
+                    filePath: message.filePath,
+                    fileExt: fileExt
+                });
+                
+                // 检查是否为图片文件
+                if (fileExt && ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt)) {
+                    isImage = true;
+                    // 读取图片文件为Base64
+                    const fileData = await vscode.workspace.fs.readFile(vscode.Uri.file(message.filePath));
+                    content = Buffer.from(fileData).toString('base64');
+                } else {
+                    // 读取文本文件
+                    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(message.filePath));
+                    content = document.getText();
+                }
                 
                 // 调试：记录文件读取信息
                 log('debug', '文件内容读取成功', {
                     fileName: fileName,
                     filePath: message.filePath,
                     contentLength: content.length,
-                    contentPreview: content.substring(0, 100) + '...'
+                    isImage: isImage,
+                    contentPreview: isImage ? '[Base64图片数据]' : content.substring(0, 100) + '...'
                 });
                 
                 // 发送选中的上下文到webview，包含完整的文件内容
-                this._view?.webview.postMessage({ 
+                const contextMessage = { 
                     type: 'contextSelected', 
                     contextType: message.contextType,
                     fileName: fileName,
                     filePath: message.filePath,
                     content: content, // 新增：提供文件内容给前端
-                    hasContent: !!content // 新增：标记是否有内容
+                    hasContent: !!content, // 新增：标记是否有内容
+                    isImage: isImage // 新增：标记是否为图片
+                };
+                
+                console.log('ChatViewProvider: 发送contextSelected消息', {
+                    type: contextMessage.type,
+                    fileName: contextMessage.fileName,
+                    hasContent: contextMessage.hasContent,
+                    isImage: contextMessage.isImage,
+                    contentLength: contextMessage.content ? contextMessage.content.length : 0
                 });
+                
+                this._view?.webview.postMessage(contextMessage);
             } catch (err) {
                 vscode.window.showErrorMessage(`无法读取文件: ${err}`);
             }
@@ -3378,6 +3988,12 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleAddImage(message: any) {
+        console.log('ChatViewProvider: handleAddImage 收到消息', {
+            hasImageData: !!message.imageData,
+            imageName: message.imageName,
+            dataLength: message.imageData ? message.imageData.length : 0
+        });
+        
         this._view?.webview.postMessage({ 
             type: 'imageAdded', 
             imageData: message.imageData,
@@ -3399,12 +4015,28 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
 
     private async handleLoadChatHistory(): Promise<void> {
         try {
+            console.log('ChatViewProvider: 开始加载聊天历史...');
+            
+            // 检查当前项目状态
+            const currentProject = dbManager.getCurrentProject();
+            console.log('ChatViewProvider: 当前项目信息:', currentProject);
+            
+            // 检查存储路径
+            const storageUri = this._extensionUri;
+            console.log('ChatViewProvider: 扩展存储URI:', storageUri.toString());
+            
             const sessions = await dbManager.getChatSessions();
+            console.log('ChatViewProvider: 获取到的会话数量:', sessions.length);
+            console.log('ChatViewProvider: 会话详情:', sessions);
+            
             const history = [];
             
             for (const session of sessions) {
+                console.log(`ChatViewProvider: 处理会话 ${session.id}: ${session.title}`);
+                
                 // 获取每个会话的消息数量
                 const messages = await dbManager.getMessages(session.id);
+                console.log(`ChatViewProvider: 会话 ${session.id} 的消息数量:`, messages.length);
                 
                 // 只包含有消息的会话
                 if (messages.length > 0) {
@@ -3415,17 +4047,26 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                         createdAt: session.created_at,
                         updatedAt: session.updated_at
                     });
+                    console.log(`ChatViewProvider: 添加会话到历史记录: ${session.title}`);
+                } else {
+                    console.log(`ChatViewProvider: 跳过空会话: ${session.title}`);
                 }
             }
             
-            console.log('Processed chat history for frontend:', history);
+            console.log('ChatViewProvider: 处理后的历史记录数量:', history.length);
+            console.log('ChatViewProvider: 最终历史记录:', history);
             
             this._view?.webview.postMessage({ 
                 type: 'chatHistoryLoaded', 
                 history: history 
             });
         } catch (error) {
-            console.error('Failed to load chat history:', error);
+            console.error('ChatViewProvider: 加载聊天历史失败:', error);
+            // 发送空历史记录给前端，避免前端等待
+            this._view?.webview.postMessage({ 
+                type: 'chatHistoryLoaded', 
+                history: [] 
+            });
         }
     }
 
@@ -3572,7 +4213,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         
         const cfg = getConfiguration();
-        const system = cfg.systemPrompt?.trim();
+        const system = cfg.builtSystemPrompt?.trim();
         // 重新添加系统提示词以防止胡乱回答，但确保不会限制详细回答
         if (this._messages.length === 0 && system) {
             this._messages.push({ role: 'system', content: system });
@@ -3626,6 +4267,15 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                 case 'md':
                 case 'markdown':
                     fileTypeHint = '这是一个Markdown文档，请分析其内容结构和文档信息。';
+                    break;
+                case 'jpg':
+                case 'jpeg':
+                case 'png':
+                case 'gif':
+                case 'bmp':
+                case 'webp':
+                case 'svg':
+                    fileTypeHint = '这是一张图片文件，请详细描述图片的内容、构图、色彩、风格和可能的用途。如果图片包含文字，请识别并转录文字内容。';
                     break;
                 default:
                     fileTypeHint = '请分析这个文件的内容、结构和功能。';
@@ -3695,17 +4345,35 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         });
         
         // 前端显示简洁的提示或原始问题
-        const textToDisplay = displayText || originalUserText || `[📄 分析文件: ${fileName}]`;
+        let textToDisplay = displayText || originalUserText || `[📄 分析文件: ${fileName}]`;
+        
+        // 特殊处理图片文件
+        if (fileName && fileContent) {
+            const fileExt = fileName.split('.').pop()?.toLowerCase();
+            if (fileExt && ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt)) {
+                textToDisplay = `[🖼️ 图片文件: ${fileName}] ${originalUserText || '请分析这张图片'}`;
+            } else {
+                textToDisplay = `[📄 文件: ${fileName}] ${originalUserText || '请分析这个文件'}`;
+            }
+        }
         
         // 保存用户消息到数据库
-        const userMessageId = await this.saveMessageToDatabase('user', textToDisplay);
+        const userMessageId = await this.saveMessageToDatabase('user', textToDisplay || '');
         
         // 创建新的控制器用于这次请求
         this._currentController = new AbortController();
         const currentController = this._currentController; // 保存引用
         
-        // 立即显示用户消息
-        this._view?.webview.postMessage({ type: 'appendUser', text: textToDisplay });
+        // 立即显示用户消息，包含文件信息
+        const messageData = { 
+            type: 'appendUser', 
+            text: textToDisplay,
+            fileInfo: fileName && fileContent ? {
+                fileName: fileName,
+                fileContent: fileContent
+            } : null
+        };
+        this._view?.webview.postMessage(messageData);
         
         let assistantText = '';
         let gotStreamChunk = false;
@@ -4311,6 +4979,10 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     overflow-y: auto;
                     margin-bottom: 10px;
                     padding: 4px;
+                    transition: margin-bottom 0.3s ease;
+                }
+                .messages.generating {
+                    margin-bottom: 50px;
                 }
                 .message {
                     margin: 8px 0;
@@ -4481,11 +5153,12 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     font-size: 12px;
                     color: var(--vscode-foreground);
                     position: absolute;
-                    top: 370px;
+                    top: -70px;
                     left: 0;
                     right: 0;
                     z-index: 1000;
                     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                    // min-height: 40px;
                 }
                 .spinners {
                     width: 16px;
@@ -4568,7 +5241,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 </div>
                 <div class="messages" id="messages"></div>
                 
-                <div class="input-section">
+                <div class="input-section" style="position: relative;">
                     <div id="loading-indicators" class="loading-indicators" style="display: none;">
                         <div class="spinners"></div>
                         <span>正在生成回复...</span>
@@ -4778,6 +5451,11 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         if (loadingEl) {
                             loadingEl.style.display = 'flex';
                         }
+                        // 添加生成状态的CSS类
+                        const messagesEl = document.querySelector('.messages');
+                        if (messagesEl) {
+                            messagesEl.classList.add('generating');
+                        }
                         isGenerating = true;
                     }
                     
@@ -4792,6 +5470,11 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         const loadingEl = document.getElementById('loading-indicators');
                         if (loadingEl) {
                             loadingEl.style.display = 'none';
+                        }
+                        // 移除生成状态的CSS类
+                        const messagesEl = document.querySelector('.messages');
+                        if (messagesEl) {
+                            messagesEl.classList.remove('generating');
                         }
                         isGenerating = false;
                     }
@@ -4822,10 +5505,19 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     }
                     
                     // 添加消息到聊天区域
-                    function addMessage(type, text) {
+                    function addMessage(type, text, fileInfo = null) {
                         const messageEl = document.createElement('div');
                         messageEl.className = 'message ' + type;
-                        messageEl.textContent = text;
+                        
+                        // 不单独显示文件信息，因为displayText已经包含了文件信息
+                        
+                        // 添加文本内容
+                        if (text) {
+                            const textEl = document.createElement('div');
+                            textEl.textContent = text;
+                            messageEl.appendChild(textEl);
+                        }
+                        
                         messagesEl.appendChild(messageEl);
                         messagesEl.scrollTop = messagesEl.scrollHeight;
                         return messageEl;
@@ -4848,21 +5540,48 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         console.log('ChatViewProvider: 检查上下文:', {
                             selectedContexts: selectedContexts,
                             hasContent: selectedContexts.some(ctx => ctx.content),
-                            selectedContextsLength: selectedContexts.length
+                            selectedContextsLength: selectedContexts.length,
+                            contextImages: contextImages,
+                            contextImagesLength: contextImages.length
                         });
                         
-                        if (selectedContexts.length > 0) {
+                        // 优先处理直接复制粘贴的图片
+                        if (contextImages.length > 0) {
+                            const image = contextImages[0]; // 取第一张图片
+                            if (image && image.data) {
+                                // 从data URL中提取Base64数据
+                                const base64Data = image.data.split(',')[1]; // 去掉 "data:image/xxx;base64," 前缀
+                                fileContent = base64Data;
+                                fileName = image.name || 'pasted-image.png';
+                                displayText = '[🖼️ 包含图片: ' + fileName + '] ' + text;
+                                
+                                console.log('ChatViewProvider: 处理粘贴的图片:', {
+                                    fileName: fileName,
+                                    hasData: !!image.data,
+                                    dataLength: image.data.length,
+                                    base64Length: base64Data.length
+                                });
+                            }
+                        }
+                        // 如果没有粘贴的图片，再处理通过"添加上下文"选择的文件
+                        else if (selectedContexts.length > 0) {
                             const fileContext = selectedContexts.find(ctx => ctx.contextType === 'file' && ctx.content);
                             if (fileContext) {
                                 fileContent = fileContext.content;
                                 fileName = fileContext.fileName;
-                                // 在前端显示简洁的提示信息
-                                displayText = '[📄 包含文件: ' + fileName + '] ' + text;
+                                
+                                // 根据文件类型显示不同的提示信息
+                                if (fileContext.isImage) {
+                                    displayText = '[🖼️ 包含图片: ' + fileName + '] ' + text;
+                                } else {
+                                    displayText = '[📄 包含文件: ' + fileName + '] ' + text;
+                                }
                                 
                                 console.log('ChatViewProvider: 找到文件内容:', {
                                     fileName: fileName,
                                     contentLength: fileContent.length,
-                                    contentPreview: fileContent.substring(0, 50) + '...'
+                                    isImage: fileContext.isImage,
+                                    contentPreview: fileContext.isImage ? '[Base64图片数据]' : fileContent.substring(0, 50) + '...'
                                 });
                             } else {
                                 console.log('ChatViewProvider: 未找到文件内容:', {
@@ -4934,7 +5653,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
 
                         // 添加编辑后的内容预览
                         const preview = document.createElement('div');
-                        preview.textContent = editedContent.substring(0, 200) + (editedContent.length > 200 ? '...' : '');
+                        preview.textContent = editedContent; // 显示全部内容，不截断
                         preview.style.fontFamily = 'monospace';
                         preview.style.fontSize = '12px';
                         preview.style.color = '#cccccc';
@@ -4943,6 +5662,12 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                         preview.style.background = '#2a2a2a';
                         preview.style.borderRadius = '4px';
                         preview.style.whiteSpace = 'pre-wrap';
+                        preview.style.width = '100%'; // 确保宽度
+                        preview.style.boxSizing = 'border-box'; // 包含边框和内边距
+                        console.log('ChatPanel 预览容器样式设置完成:', {
+                            contentLength: editedContent.length,
+                            autoHeight: true
+                        });
                         editResultContainer.appendChild(preview);
 
                         // 添加按钮容器
@@ -5105,16 +5830,22 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     
                     // 图片粘贴功能
                     document.addEventListener('paste', (e) => {
+                        console.log('检测到粘贴事件', e);
                         const items = e.clipboardData?.items;
+                        console.log('剪贴板项目:', items);
                         if (!items) return;
                         
                         for (let item of items) {
+                            console.log('检查剪贴板项目:', item.type);
                             if (item.type.startsWith('image/')) {
+                                console.log('发现图片，开始处理');
                                 e.preventDefault();
                                 const file = item.getAsFile();
                                 if (file) {
+                                    console.log('获取到文件:', file.name, file.size);
                                     const reader = new FileReader();
                                     reader.onload = (event) => {
+                                        console.log('文件读取完成，发送addImage消息');
                                         vscode.postMessage({
                                             type: 'addImage',
                                             imageData: event.target.result,
@@ -5138,7 +5869,14 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 break;
                             case 'contextSelected':
                                 console.log('ChatViewProvider: 收到contextSelected消息', message);
-                                selectedContexts.push(message);
+                                selectedContexts.push({
+                                    contextType: message.contextType,
+                                    fileName: message.fileName,
+                                    filePath: message.filePath,
+                                    content: message.content,
+                                    hasContent: message.hasContent,
+                                    isImage: message.isImage
+                                });
                                 renderContextTags();
                                 hideFilePanel();
                                 console.log('ChatViewProvider: 更新后的selectedContexts', selectedContexts);
@@ -5152,14 +5890,20 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 renderContextTags();
                                 break;
                             case 'imageAdded':
+                                console.log('前端收到imageAdded消息', {
+                                    hasImageData: !!message.imageData,
+                                    imageName: message.imageName,
+                                    dataLength: message.imageData ? message.imageData.length : 0
+                                });
                                 contextImages.push({
                                     data: message.imageData,
                                     name: message.imageName
                                 });
+                                console.log('更新后的contextImages:', contextImages);
                                 renderContextTags();
                                 break;
                             case 'appendUser':
-                                addMessage('user', message.text);
+                                addMessage('user', message.text, message.fileInfo);
                                 lastAssistantEl = addMessage('assistant', '');
                                 assemblingAssistant = true;
                                 break;
@@ -5300,12 +6044,17 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                     fileName: item.dataset.name,
                                     filePath: item.dataset.path
                                 });
-                                vscode.postMessage({
+                                
+                                // 发送选择上下文消息
+                                const selectMessage = {
                                     type: 'selectContext',
                                     contextType: 'file',
                                     filePath: item.dataset.path,
                                     fileName: item.dataset.name
-                                });
+                                };
+                                console.log('ChatViewProvider: 发送selectContext消息', selectMessage);
+                                
+                                vscode.postMessage(selectMessage);
                                 hideFilePanel();
                             });
                         });

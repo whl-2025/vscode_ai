@@ -2,7 +2,7 @@
   "name": "gpt-ccdc",
   "displayName": "GPT.CCDC",
   "description": "GPT tool inside VS Code.",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "ccdc-lab",
   "engines": {
     "vscode": "^1.90.0"
@@ -75,6 +75,22 @@
       {
         "command": "ccdc.checkStorageStatus",
         "title": "Ccdc: Check Storage Status (Detailed)"
+      },
+      {
+        "command": "ccdc.diagnostic",
+        "title": "Ccdc: Diagnostic"
+      },
+      {
+        "command": "ccdc.createStorage",
+        "title": "Ccdc: Create Storage Directory"
+      },
+      {
+        "command": "ccdc.fixIntranet",
+        "title": "Ccdc: Fix Intranet Environment"
+      },
+      {
+        "command": "ccdc.testApi",
+        "title": "Ccdc: Test API Connection"
       }
     ],
     "viewsContainers": {
@@ -134,45 +150,6 @@
           "minimum": 1,
           "maximum": 4096,
           "description": "The maximum number of tokens to generate in the completion."
-        },
-        "ccdcCodeGen.promptMode": {
-          "type": "string",
-          "enum": [
-            "basic",
-            "enhanced"
-          ],
-          "default": "enhanced",
-          "description": "AI助手的提示词模式：basic（基础）、enhanced（增强）"
-        },
-        "ccdcCodeGen.enableToolInstructions": {
-          "type": "boolean",
-          "default": true,
-          "description": "是否启用详细的工具使用指导"
-        },
-        "ccdcCodeGen.enableCodingBestPractices": {
-          "type": "boolean",
-          "default": true,
-          "description": "是否启用编程最佳实践指导"
-        },
-        "ccdcCodeGen.enableChineseInstructions": {
-          "type": "boolean",
-          "default": true,
-          "description": "是否启用中文特色指导（保持原有中文分析特色）"
-        },
-        "ccdcCodeGen.systemPrompt": {
-          "type": "string",
-          "default": "",
-          "description": "自定义系统提示词（可选，将追加到生成的提示词后面）"
-        },
-        "ccdcCodeGen.stream": {
-          "type": "boolean",
-          "default": true,
-          "description": "Whether to stream the response for faster perceived performance."
-        },
-        "ccdcCodeGen.fastMode": {
-          "type": "boolean",
-          "default": false,
-          "description": "启用快速模式（减少系统提示词，提高响应速度）"
         },
         "ccdcCodeGen.timeoutMs": {
           "type": "integer",

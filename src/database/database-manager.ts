@@ -109,10 +109,24 @@ export class DatabaseManager {
      * 获取当前项目的所有聊天会话
      */
     async getChatSessions(): Promise<ChatSession[]> {
+        console.log('DatabaseManager: 获取聊天会话...');
+        console.log('DatabaseManager: 当前项目数据库状态:', !!this.currentProjectDb);
+        console.log('DatabaseManager: 当前项目信息:', this.currentProject);
+        
         if (!this.currentProjectDb) {
+            console.log('DatabaseManager: 没有当前项目数据库，返回空数组');
             return [];
         }
-        return await this.currentProjectDb.getChatSessions();
+        
+        try {
+            const sessions = await this.currentProjectDb.getChatSessions();
+            console.log('DatabaseManager: 获取到的会话数量:', sessions.length);
+            console.log('DatabaseManager: 会话详情:', sessions);
+            return sessions;
+        } catch (error) {
+            console.error('DatabaseManager: 获取聊天会话失败:', error);
+            return [];
+        }
     }
 
     /**

@@ -86,16 +86,6 @@
           "minimum": 1,
           "description": "The maximum number of tokens to generate in the completion."
         },
-        "ccdcCodeGen.systemPrompt": {
-          "type": "string",
-          "default": "你是一个专业的代码分析助手。请用中文分析用户提供的文件内容。不要重复同一个词语或句子。提供简洁、清晰的分析。",
-          "description": "The system prompt to use for the AI model."
-        },
-        "ccdcCodeGen.stream": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether to stream the response."
-        },
         "ccdcCodeGen.timeoutMs": {
           "type": "integer",
           "default": 120000,

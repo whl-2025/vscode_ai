@@ -49,7 +49,6 @@ code --install-extension ccdc-lab.gpt-ccdc
 | `model` | 使用的模型名称 | `gpt-3.5-turbo` |
 | `temperature` | 生成温度 (0-1) | `0.2` |
 | `maxTokens` | 最大生成token数 | `512` |
-| `systemPrompt` | 系统提示词 | 编程助手提示词 |
 | `stream` | 是否启用流式输出 | `false` |
 | `timeoutMs` | 请求超时时间(ms) | `60000` |
 | `logLevel` | 日志级别 | `info` |
