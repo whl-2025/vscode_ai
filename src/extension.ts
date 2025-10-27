@@ -80,7 +80,7 @@ function getConfiguration() {
         temperature: config.get<number>('temperature', 0.1),
         maxTokens: config.get<number>('maxTokens', 2048),
         builtSystemPrompt: promptManager.buildSystemPrompt({}), // 构建后的完整系统提示词
-        timeoutMs: config.get<number>('timeoutMs', 120000),
+        timeoutMs: config.get<number>('timeoutMs', 300000), // 增加到5分钟，适合图片分析
         logLevel: (config.get<string>('logLevel', 'info') as LogLevel) || 'info',
         useDatabase: config.get<boolean>('useDatabase', true),
         maxHistoryDays: config.get<number>('maxHistoryDays', 30),
@@ -389,13 +389,21 @@ export function activate(context: vscode.ExtensionContext) {
             const currentProject = dbManager.getCurrentProject();
             console.log('当前项目:', currentProject);
             
-            // 检查存储路径
-            const storageUri = context.globalStorageUri;
-            console.log('存储URI:', storageUri.toString());
-            
             // 检查文件系统访问权限
             const fs = require('fs');
             const path = require('path');
+            
+            // 检查存储路径，添加错误处理
+            let storageUri: vscode.Uri;
+            try {
+                storageUri = context.globalStorageUri;
+                console.log('存储URI:', storageUri.toString());
+            } catch (error) {
+                console.error('无法访问标准存储路径:', error);
+                const homeDir = require('os').homedir();
+                storageUri = vscode.Uri.file(path.join(homeDir, '.ccdc-storage'));
+                console.log('使用替代存储URI:', storageUri.toString());
+            }
             let storagePathExists = false;
             let storagePathWritable = false;
             let projectsDirExists = false;
@@ -533,9 +541,16 @@ export function activate(context: vscode.ExtensionContext) {
             const fs = require('fs');
             const path = require('path');
             
-            // 获取存储路径
-            const storageUri = context.globalStorageUri;
-            const storagePath = storageUri.fsPath;
+            // 获取存储路径，添加错误处理
+            let storagePath: string;
+            try {
+                const storageUri = context.globalStorageUri;
+                storagePath = storageUri.fsPath;
+            } catch (error) {
+                console.error('无法访问标准存储路径，使用替代路径:', error);
+                const homeDir = require('os').homedir();
+                storagePath = path.join(homeDir, '.ccdc-storage');
+            }
             
             console.log('创建存储目录:', storagePath);
             
@@ -703,8 +718,17 @@ export function activate(context: vscode.ExtensionContext) {
             // 检查当前存储路径状态
             const fs = require('fs');
             const path = require('path');
-            const storageUri = context.globalStorageUri;
-            const standardStoragePath = storageUri.fsPath;
+            
+            // 获取存储路径，添加错误处理
+            let standardStoragePath: string;
+            try {
+                const storageUri = context.globalStorageUri;
+                standardStoragePath = storageUri.fsPath;
+            } catch (error) {
+                console.error('无法访问标准存储路径，使用替代路径:', error);
+                const homeDir = require('os').homedir();
+                standardStoragePath = path.join(homeDir, '.ccdc-storage');
+            }
             
             console.log('标准存储路径:', standardStoragePath);
             console.log('标准存储路径是否存在:', fs.existsSync(standardStoragePath));
@@ -982,8 +1006,16 @@ ${Object.entries(stats.languageStats).map(([lang, count]) => `• ${lang}: ${cou
             const storageType = dbManager.getStorageType();
             const isSQLiteAvailable = dbManager.isSQLiteAvailable();
             
-            // 检查存储目录
-            const storagePath = context.globalStorageUri.fsPath;
+            // 检查存储目录，添加错误处理
+            let storagePath: string;
+            try {
+                storagePath = context.globalStorageUri.fsPath;
+            } catch (error) {
+                console.error('无法访问标准存储路径，使用替代路径:', error);
+                const homeDir = require('os').homedir();
+                storagePath = path.join(homeDir, '.ccdc-storage');
+            }
+            
             const fs = require('fs');
             const files = fs.readdirSync(storagePath);
             const projectFiles = files.filter((file: string) => file.startsWith('project_') && file.endsWith('.json'));
@@ -1003,7 +1035,55 @@ ${Object.entries(stats.languageStats).map(([lang, count]) => `• ${lang}: ${cou
             vscode.window.showErrorMessage(`检查失败: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     });
-    context.subscriptions.push(checkStorageStatusCommand);
+    // 监听工作区变化，自动切换项目
+    const workspaceChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
+        console.log('工作区变化检测到:', event);
+        
+        // 如果有新增的工作区文件夹，切换到第一个
+        if (event.added.length > 0) {
+            const newProjectPath = event.added[0].uri.fsPath;
+            console.log('检测到新项目，自动切换:', newProjectPath);
+            
+            try {
+                const switchResult = await dbManager.switchToProject(newProjectPath);
+                console.log('自动项目切换结果:', switchResult);
+                
+                if (switchResult) {
+                    const currentProject = dbManager.getCurrentProject();
+                    console.log('当前项目已切换为:', currentProject);
+                    
+                    // 通知前端重新加载历史数据
+                    ChatPanel.refresh();
+                }
+            } catch (error) {
+                console.error('自动项目切换失败:', error);
+            }
+        }
+        
+        // 如果有移除的工作区文件夹，检查是否需要切换
+        if (event.removed.length > 0) {
+            const currentProject = dbManager.getCurrentProject();
+            if (currentProject) {
+                const removedPaths = event.removed.map(folder => folder.uri.fsPath);
+                if (removedPaths.includes(currentProject.project_path)) {
+                    console.log('当前项目已被移除，切换到默认项目');
+                    
+                    // 切换到剩余的第一个工作区，或者使用当前目录
+                    const remainingFolders = vscode.workspace.workspaceFolders;
+                    if (remainingFolders && remainingFolders.length > 0) {
+                        await dbManager.switchToProject(remainingFolders[0].uri.fsPath);
+                    } else {
+                        // 没有工作区时，使用当前目录
+                        await dbManager.switchToProject(process.cwd());
+                    }
+                    
+                    // 通知前端重新加载历史数据
+                    ChatPanel.refresh();
+                }
+            }
+        }
+    });
+    context.subscriptions.push(workspaceChangeListener);
 
 }
 
@@ -1203,7 +1283,7 @@ class ConfigurationPanel {
                     
                     <div class="form-group">
                         <label for="timeoutMs">Timeout (ms):</label>
-                        <input type="number" id="timeoutMs" min="1000" placeholder="60000">
+                        <input type="number" id="timeoutMs" min="1000" placeholder="300000">
                     </div>
                     
                     <div class="form-group">
@@ -1231,7 +1311,10 @@ async function openConfigurationPanel(extensionUri: vscode.Uri) {
 }
 
 // ===== Chat Webview =====
-type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+type ChatMessage = { 
+    role: 'system' | 'user' | 'assistant'; 
+    content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> 
+};
 
 async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onChunk?: (chunk: string) => void): Promise<string> {
     const cfg = getConfiguration();
@@ -1249,6 +1332,9 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     const client = isHttps ? https : http;
 
     return new Promise<string>((resolve, reject) => {
+        let isStreamComplete = false;
+        let hasReceivedData = false;
+        
         const req = client.request(
             {
                 method: 'POST',
@@ -1299,13 +1385,17 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                 // 流式处理响应
                 let full = '';
                 res.setEncoding('utf8');
+                
                 res.on('data', (chunk: string) => {
+                    hasReceivedData = true;
                     const lines = chunk.split(/\r?\n/).filter(Boolean);
                     for (const line of lines) {
                         try {
                             if (line.startsWith('data: ')) {
                                 const data = line.substring(6);
                                 if (data === '[DONE]') {
+                                    isStreamComplete = true;
+                                    log('debug', 'OpenAI stream completed with [DONE] marker');
                                     continue;
                                 }
                                 const obj = JSON.parse(data) as OpenAIChatResponse;
@@ -1315,16 +1405,56 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                                     onChunk?.(piece);
                                 }
                             }
-                        } catch {
-                            // 忽略解析错误的行
+                        } catch (parseError) {
+                            // 记录解析错误但不中断流
+                            log('debug', 'Stream parsing error (ignored)', { 
+                                line: line.substring(0, 100), 
+                                error: String(parseError) 
+                            });
                         }
                     }
                 });
-                res.on('end', () => resolve(full));
+                
+                res.on('end', () => {
+                    log('debug', 'HTTP response ended', { 
+                        isStreamComplete, 
+                        hasReceivedData, 
+                        contentLength: full.length 
+                    });
+                    
+                    if (!isStreamComplete && hasReceivedData && full.length > 0) {
+                        log('info', 'Stream ended without [DONE] marker, but content received', {
+                            contentLength: full.length,
+                            contentPreview: full.substring(0, 100)
+                        });
+                    }
+                    
+                    if (full.length === 0 && hasReceivedData) {
+                        reject(new Error('Received empty response from AI service'));
+                        return;
+                    }
+                    
+                    resolve(full);
+                });
+                
+                res.on('error', (error) => {
+                    log('info', 'Response stream error', { error: String(error) });
+                    reject(new Error(`Stream error: ${error.message}`));
+                });
             }
         );
 
-        req.on('error', (err) => reject(err));
+        req.on('error', (err) => {
+            log('info', 'HTTP request error', { error: String(err) });
+            reject(err);
+        });
+        
+        req.on('timeout', () => {
+            log('info', 'Request timeout', { timeoutMs: cfg.timeoutMs });
+            req.destroy();
+            reject(new Error(`Request timeout after ${cfg.timeoutMs}ms`));
+        });
+        
         req.write(payload);
         req.end();
     });
@@ -1874,6 +2004,13 @@ class ChatPanel {
         ChatPanel.currentPanel = new ChatPanel(panel, extensionUri);
     }
 
+    public static refresh() {
+        if (ChatPanel.currentPanel) {
+            // 通知前端重新加载历史数据
+            ChatPanel.currentPanel._panel.webview.postMessage({ type: 'refreshHistory' });
+        }
+    }
+
     private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
         this._panel = panel;
         this._panel.webview.html = this._getHtmlForWebview(this._panel.webview);
@@ -2041,6 +2178,7 @@ class ChatPanel {
                 
                 // 处理文件内容拼接（在后端处理，避免前端JavaScript复杂性）
                 let userTextForModel = userText;
+                let isImageMessage = false;
                 
                 // 确保至少有一种内容
                 if (!userText && msg.fileContent === undefined) {
@@ -2084,6 +2222,7 @@ class ChatPanel {
                         case 'bmp':
                         case 'webp':
                         case 'svg':
+                            isImageMessage = true;
                             fileTypeHint = '这是一张图片文件，请详细描述图片的内容、构图、色彩、风格和可能的用途。如果图片包含文字，请识别并转录文字内容。';
                             break;
                         default:
@@ -2133,6 +2272,29 @@ ${msg.fileContent}
 文件内容：<空文件>
 
 ${userText ? `问题: ${userText}` : '请分析这个空文件的结构和可能的用途。'}`;
+                        } else if (isImageMessage) {
+                            // 图片消息：使用多模态格式
+                            const imageDataUrl = `data:image/${fileExt};base64,${msg.fileContent}`;
+                            userTextForModel = `请分析这张图片: ${userText || '请详细描述图片内容'}`;
+                            
+                            // 将图片数据添加到消息中
+                            this._messages.push({ 
+                                role: 'user', 
+                                content: [
+                                    { type: 'text', text: userTextForModel },
+                                    { type: 'image_url', image_url: { url: imageDataUrl } }
+                                ] as any
+                            });
+                            
+                            log('info', '构建图片分析消息', {
+                                fileName: msg.fileName,
+                                fileExt: fileExt,
+                                hasImageData: !!msg.fileContent,
+                                imageDataLength: msg.fileContent.length,
+                                userText: userText || '默认图片分析'
+                            });
+                            
+                            // 图片消息处理完成，继续到后续的API调用逻辑
                         } else {
                             // 分析模式：有内容的文件
                             userTextForModel = `分析这个${fileExt}文件:
@@ -2179,9 +2341,14 @@ ${userText ? `问题: ${userText}` : ''}`;
                 this._messages.push({ role: 'user', content: userTextForModel });
                 
                 // 调试信息：记录发送给AI的完整消息
+                const systemContent = this._messages.find(m => m.role === 'system')?.content;
+                const systemPromptText = typeof systemContent === 'string' 
+                    ? systemContent.substring(0, 100) + '...'
+                    : '[' + JSON.stringify(systemContent).substring(0, 100) + '...]';
+                    
                 log('debug', '发送给AI的消息详细信息', { 
                     messagesCount: this._messages.length,
-                    systemPrompt: this._messages.find(m => m.role === 'system')?.content?.substring(0, 100) + '...',
+                    systemPrompt: systemPromptText,
                     userMessage: userTextForModel.substring(0, 300) + (userTextForModel.length > 300 ? '...' : ''),
                     hasFileContent: !!(msg.fileContent && msg.fileName),
                     fileName: msg.fileName || 'none',
@@ -3661,7 +3828,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                 lastAssistantEl.insertAdjacentElement('afterend', editResultContainer);
             }
 
-            // 添加保存按钮到最后一条助手消息的右下角
+            // 添加保存按钮到最后一条助手消息的下一行
             function addSaveButtonToLastMessage() {
                 if (lastAssistantEl) {
                     const oldSaveBtn = document.getElementById('save');
@@ -3669,19 +3836,31 @@ ${userText ? `问题: ${userText}` : ''}`;
                         oldSaveBtn.remove();
                     }
                     
+                    // 创建容器包裹按钮
+                    const saveBtnContainer = document.createElement('div');
+                    saveBtnContainer.id = 'save';
+                    saveBtnContainer.style.display = 'flex';
+                    saveBtnContainer.style.justifyContent = 'flex-end';
+                    saveBtnContainer.style.width = '100%';
+                    saveBtnContainer.style.marginTop = '8px';
+                    saveBtnContainer.style.marginBottom = '8px';
+                    
                     const saveBtn = document.createElement('button');
-                    saveBtn.id = 'save';
-                    saveBtn.className = 'secondary save-btn';
                     saveBtn.textContent = '保存到文件';
-                    saveBtn.style.position = 'relative';
-                    saveBtn.style.float = 'right';
-                    saveBtn.style.marginTop = '8px';
+                    saveBtn.style.padding = '6px 12px';
+                    saveBtn.style.background = '#4e94ce';
+                    saveBtn.style.color = 'white';
+                    saveBtn.style.border = 'none';
+                    saveBtn.style.borderRadius = '4px';
+                    saveBtn.style.cursor = 'pointer';
+                    saveBtn.style.fontSize = '12px';
                     
                     saveBtn.addEventListener('click', () => {
                         vscode.postMessage({ type: 'saveToFile', text: lastAssistantEl.textContent || '' });
                     });
                     
-                    lastAssistantEl.insertAdjacentElement('afterend', saveBtn);
+                    saveBtnContainer.appendChild(saveBtn);
+                    lastAssistantEl.insertAdjacentElement('afterend', saveBtnContainer);
                 }
             }
             
@@ -3810,6 +3989,10 @@ ${userText ? `问题: ${userText}` : ''}`;
                     chatHistory = chatHistory.filter(chat => chat.id !== msg.chatId);
                     renderHistoryPanel();
                     console.log('ChatPanel: Chat deleted:', msg.chatId);
+                }
+                if (msg.type === 'refreshHistory') {
+                    console.log('ChatPanel: 收到刷新历史记录请求');
+                    loadChatHistoryFromDatabase();
                 }
             });
         `;
@@ -4110,8 +4293,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
             console.log('ChatViewProvider: 当前项目信息:', currentProject);
             
             // 检查存储路径
-            const storageUri = this._extensionUri;
-            console.log('ChatViewProvider: 扩展存储URI:', storageUri.toString());
+            console.log('ChatViewProvider: 扩展存储URI:', this._extensionUri.toString());
             
             const sessions = await dbManager.getChatSessions();
             console.log('ChatViewProvider: 获取到的会话数量:', sessions.length);
@@ -4369,10 +4551,41 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
                     fileTypeHint = '请分析这个文件的内容、结构和功能。';
             }
             
-            // 根据编辑意图调整提示词
-            if (hasEditIntent) {
-                // 编辑模式：要求模型直接输出修改后的完整文件内容
-                userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请直接输出修改后的完整文件内容，不要添加任何解释文字。
+            // 检查是否是图片文件
+            const isImage = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(fileExt || '');
+            
+            if (isImage) {
+                // 图片文件：使用多模态格式
+                const imageDataUrl = `data:image/${fileExt};base64,${fileContent}`;
+                const imagePromptText = hasEditIntent 
+                    ? `请根据用户要求编辑这个图片的视觉内容：${originalUserText}`
+                    : originalUserText || '请详细描述图片的内容、构图、色彩、风格和可能的用途。如果图片包含文字，请识别并转录文字内容。';
+                
+                // 将图片数据添加到消息中
+                this._messages.push({ 
+                    role: 'user', 
+                    content: [
+                        { type: 'text', text: imagePromptText },
+                        { type: 'image_url', image_url: { url: imageDataUrl } }
+                    ] as any
+                });
+                
+                log('info', 'ChatViewProvider: 构建图片分析消息', {
+                    fileName: fileName,
+                    fileExt: fileExt,
+                    hasImageData: !!fileContent,
+                    imageDataLength: fileContent.length,
+                    imagePromptText: imagePromptText,
+                    hasEditIntent: hasEditIntent
+                });
+                
+                // 设置 userTextForModel 用于后续显示（虽然不会发送给模型）
+                userTextForModel = imagePromptText;
+            } else {
+                // 非图片文件：根据编辑意图调整提示词
+                if (hasEditIntent) {
+                    // 编辑模式：要求模型直接输出修改后的完整文件内容
+                    userTextForModel = `请根据用户要求编辑这个${fileExt}文件。请直接输出修改后的完整文件内容，不要添加任何解释文字。
 
 原文件内容：
 ${fileContent}
@@ -4380,23 +4593,29 @@ ${fileContent}
 用户要求：${originalUserText}
 
 请直接输出修改后的完整文件内容：`;
-            } else {
-                // 分析模式：保持原有逻辑
-                userTextForModel = `分析这个${fileExt}文件:
+                } else {
+                    // 分析模式：保持原有逻辑
+                    userTextForModel = `分析这个${fileExt}文件:
 
 ${fileContent}
 
 ${originalUserText ? `问题: ${originalUserText}` : ''}`;
+                }
+                
+                this._messages.push({ role: 'user', content: userTextForModel });
+                
+                log('info', 'ChatViewProvider: 构建文件分析提示', {
+                    fileName: fileName,
+                    fileExt: fileExt || '未知',
+                    contentLength: fileContent.length,
+                    originalQuestion: originalUserText || '默认文件分析问题',
+                    hasContent: true
+                });
             }
-            
-            log('info', 'ChatViewProvider: 构建文件分析提示', {
-                fileName: fileName,
-                fileExt: fileExt || '未知',
-                contentLength: fileContent.length,
-                originalQuestion: originalUserText || '默认文件分析问题',
-                hasContent: true
-            });
         } else {
+            // 没有文件，只有文本
+            this._messages.push({ role: 'user', content: userTextForModel });
+            
             log('info', 'ChatViewProvider: 未收到文件内容，使用纯文本问题', {
                 hasFileContent: false,
                 hasFileName: !!fileName,
@@ -4420,8 +4639,6 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             messageLength: userTextForModel.length,
             hasSystemPrompt: !!(system)
         });
-        
-        this._messages.push({ role: 'user', content: userTextForModel });
         
         // 调试信息：记录发送给AI的完整消息
         log('debug', 'ChatViewProvider: 发送给AI的消息详细信息', { 
@@ -5822,7 +6039,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                             const saveBtn = document.createElement('button');
                             saveBtn.id = 'save';
                             saveBtn.textContent = '保存到文件';
-                            saveBtn.style.cssText = 'position: relative; float: right; margin-top: 8px; padding: 4px 8px; background: #0078d4; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;';
+                            saveBtn.style.cssText = 'display: block; margin: 8px 0 0 auto; padding: 4px 8px; background: #0078d4; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; width: fit-content;';
                             
                             saveBtn.addEventListener('click', () => {
                                 vscode.postMessage({ type: 'saveToFile', text: lastAssistantEl.textContent || '' });

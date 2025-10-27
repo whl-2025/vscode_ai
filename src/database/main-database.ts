@@ -29,10 +29,42 @@ export class MainDatabase {
         this.dbPath = path.join(storageUri.fsPath, 'main_database.sqlite');
         this.jsonPath = path.join(storageUri.fsPath, 'main_database.json');
         
+        // 确保存储目录存在
+        this.ensureStorageDirectory(storageUri.fsPath);
+        
         // 在VS Code扩展环境中，直接使用JSON存储
         console.log('MainDatabase: Using JSON storage (VS Code extension environment)');
         this.useSQLite = false;
         this.initializeJSON();
+    }
+
+    /**
+     * 确保存储目录存在
+     */
+    private ensureStorageDirectory(storagePath: string): void {
+        try {
+            if (!fs.existsSync(storagePath)) {
+                fs.mkdirSync(storagePath, { recursive: true });
+                console.log('MainDatabase: 存储目录已创建:', storagePath);
+            }
+        } catch (error) {
+            console.error('MainDatabase: 创建存储目录失败:', error);
+            // 如果标准存储路径失败，尝试使用用户主目录
+            const homeDir = require('os').homedir();
+            const alternativePath = path.join(homeDir, '.ccdc-storage');
+            try {
+                if (!fs.existsSync(alternativePath)) {
+                    fs.mkdirSync(alternativePath, { recursive: true });
+                    console.log('MainDatabase: 使用替代存储路径:', alternativePath);
+                }
+                // 更新路径
+                this.dbPath = path.join(alternativePath, 'main_database.sqlite');
+                this.jsonPath = path.join(alternativePath, 'main_database.json');
+            } catch (altError) {
+                console.error('MainDatabase: 替代存储路径也失败:', altError);
+                throw new Error('无法创建存储目录，请检查文件系统权限');
+            }
+        }
     }
 
     /**

@@ -44,15 +44,72 @@ export class ProjectDatabase {
         this.contextPath = path.join(this.projectDir, 'context_files.json');
         this.statsPath = path.join(this.projectDir, 'stats.json');
         
-        // 确保项目目录存在
-        if (!fs.existsSync(this.projectDir)) {
-            fs.mkdirSync(this.projectDir, { recursive: true });
-        }
+        // 确保存储目录和项目目录存在
+        this.ensureStorageDirectories(storageUri.fsPath);
         
         // 在VS Code扩展环境中，直接使用分文件JSON存储
         console.log(`ProjectDatabase: Using 分文件存储 for project ${cleanProjectName}`);
         this.useSQLite = false;
         this.initializeJSON();
+    }
+
+    /**
+     * 确保存储目录存在
+     */
+    private ensureStorageDirectories(storagePath: string): void {
+        try {
+            // 确保主存储目录存在
+            if (!fs.existsSync(storagePath)) {
+                fs.mkdirSync(storagePath, { recursive: true });
+                console.log('ProjectDatabase: 主存储目录已创建:', storagePath);
+            }
+            
+            // 确保projects目录存在
+            const projectsDir = path.join(storagePath, 'projects');
+            if (!fs.existsSync(projectsDir)) {
+                fs.mkdirSync(projectsDir, { recursive: true });
+                console.log('ProjectDatabase: projects目录已创建:', projectsDir);
+            }
+            
+            // 确保项目目录存在
+            if (!fs.existsSync(this.projectDir)) {
+                fs.mkdirSync(this.projectDir, { recursive: true });
+                console.log('ProjectDatabase: 项目目录已创建:', this.projectDir);
+            }
+        } catch (error) {
+            console.error('ProjectDatabase: 创建存储目录失败:', error);
+            // 如果标准存储路径失败，尝试使用用户主目录
+            const homeDir = require('os').homedir();
+            const alternativePath = path.join(homeDir, '.ccdc-storage');
+            try {
+                if (!fs.existsSync(alternativePath)) {
+                    fs.mkdirSync(alternativePath, { recursive: true });
+                    console.log('ProjectDatabase: 使用替代存储路径:', alternativePath);
+                }
+                
+                // 更新所有路径
+                const cleanProjectName = this.sanitizeProjectName(path.basename(this.projectDir));
+                this.dbPath = path.join(alternativePath, `project_${cleanProjectName}.sqlite`);
+                this.projectDir = path.join(alternativePath, 'projects', cleanProjectName);
+                this.sessionsPath = path.join(this.projectDir, 'sessions.json');
+                this.messagesPath = path.join(this.projectDir, 'messages.json');
+                this.filesPath = path.join(this.projectDir, 'generated_files.json');
+                this.contextPath = path.join(this.projectDir, 'context_files.json');
+                this.statsPath = path.join(this.projectDir, 'stats.json');
+                
+                // 确保替代路径的项目目录存在
+                const altProjectsDir = path.join(alternativePath, 'projects');
+                if (!fs.existsSync(altProjectsDir)) {
+                    fs.mkdirSync(altProjectsDir, { recursive: true });
+                }
+                if (!fs.existsSync(this.projectDir)) {
+                    fs.mkdirSync(this.projectDir, { recursive: true });
+                }
+            } catch (altError) {
+                console.error('ProjectDatabase: 替代存储路径也失败:', altError);
+                throw new Error('无法创建存储目录，请检查文件系统权限');
+            }
+        }
     }
 
     /**
