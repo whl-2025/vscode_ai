@@ -1581,6 +1581,9 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
     let baseFileName = 'generated';
     let fileExtension = '';
 
+    // 定义需要保持原有代码清理逻辑的特定语言
+    const specificLanguages = ['java', 'csharp', 'python', 'javascript', 'typescript', 'vue', 'jsx', 'tsx', 'html', 'css', 'sql'];
+    
     // 智能判断内容类型，避免误判
     const trimmedCode = code.trim();
     const isPlainText = isLikelyPlainText(trimmedCode);
@@ -1604,8 +1607,24 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
             contentPreview: trimmedCode.substring(0, 50) 
         });
     } else {
-        // 根据语言确定文件扩展名
-        fileExtension = getFileExtension(language);
+        // 检查是否为特定语言
+        const normalizedLanguage = language.toLowerCase();
+        if (specificLanguages.includes(normalizedLanguage)) {
+            // 特定语言保持原有逻辑
+            fileExtension = getFileExtension(language);
+            log('info', '检测到特定编程语言，使用对应扩展名', { 
+                detectedLanguage: language,
+                fileExtension: fileExtension,
+                contentPreview: trimmedCode.substring(0, 50) 
+            });
+        } else {
+            // 其他所有语言都保存为 .txt 文件
+            fileExtension = '.txt';
+            log('info', '检测到非特定语言，保存为 .txt 文件', { 
+                detectedLanguage: language,
+                contentPreview: trimmedCode.substring(0, 50) 
+            });
+        }
     }
 
     let fileName = baseFileName + fileExtension;
@@ -1640,20 +1659,42 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
 
     const fileUri = vscode.Uri.file(path.join(generatedFolderPath, fileName));
 
-    // 根据文件类型决定是否清理代码
+    // 根据语言类型决定是否清理代码
     let finalCode = code;
     
-    // 对于代码文件（vue、py、js、ts等），清理注释和解释文字
-    const codeFileExtensions = ['.vue', '.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.scss', '.less', '.xml', '.json', '.yaml', '.yml'];
-    const isCodeFile = codeFileExtensions.some(ext => fileExtension.toLowerCase() === ext);
+    // 检查是否为特定语言（需要代码清理）
+    const normalizedLanguage = language.toLowerCase();
+    const isSpecificLanguage = specificLanguages.includes(normalizedLanguage);
     
-    if (isCodeFile) {
-        // 对于代码文件，清理注释和解释文字
-        const cleanedCode = cleanAICodeResponse(code, language, true, true); // 启用删除中文注释和纯净代码提取
-        finalCode = cleanCodeBlockMarkers(cleanedCode.cleanedCode);
+    if (isSpecificLanguage) {
+        // 对于特定编程语言，清理注释和解释文字
+        try {
+            const cleanedCode = cleanAICodeResponse(code, language, true, true); // 启用删除中文注释和纯净代码提取
+            finalCode = cleanCodeBlockMarkers(cleanedCode.cleanedCode);
+            log('info', '对特定语言进行代码清理', { 
+                language: language,
+                originalLength: code.length,
+                cleanedLength: finalCode.length 
+            });
+        } catch (error) {
+            // 如果代码清理失败，使用原始代码
+            finalCode = code;
+            log('info', '代码清理失败，使用原始代码', { error: String(error) });
+        }
     } else {
-        // 对于txt和md文件，保留原始内容，只清理代码块标记，不删除中文内容
-        finalCode = cleanCodeBlockMarkersForText(code);
+        // 对于非特定语言（保存为.txt），保留原始内容，只清理代码块标记，不删除中文内容
+        try {
+            finalCode = cleanCodeBlockMarkersForText(code);
+            log('info', '对非特定语言保留完整内容', { 
+                language: language,
+                contentLength: finalCode.length,
+                fileExtension: fileExtension 
+            });
+        } catch (error) {
+            // 如果文本清理失败，使用原始内容
+            finalCode = code;
+            log('info', '文本清理失败，使用原始内容', { error: String(error) });
+        }
     }
 
     // 写入文件
@@ -1668,25 +1709,25 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
         console.error('Failed to get file size:', error);
     }
 
-    // 将生成的文件信息保存到数据库
-    try {
-        const generatedFile: Omit<GeneratedFile, 'id'> = {
-            session_id: sessionId,
-            message_id: messageId,
-            file_name: fileName,
-            file_path: fileUri.fsPath,
-            language: language,
-            original_code: code,
-            cleaned_code: finalCode,
-            created_at: new Date().toISOString(),
-            file_size: fileSize
-        };
-        
-        await dbManager.addGeneratedFile(generatedFile);
+    // 异步保存到数据库，不阻塞主流程
+    const generatedFile: Omit<GeneratedFile, 'id'> = {
+        session_id: sessionId,
+        message_id: messageId,
+        file_name: fileName,
+        file_path: fileUri.fsPath,
+        language: language,
+        original_code: code,
+        cleaned_code: finalCode,
+        created_at: new Date().toISOString(),
+        file_size: fileSize
+    };
+    
+    // 异步执行数据库操作，不等待完成
+    dbManager.addGeneratedFile(generatedFile).then(() => {
         log('info', 'Generated file record saved to database', { fileName, language, fileSize });
-    } catch (error) {
+    }).catch((error) => {
         console.error('Failed to save generated file record:', error);
-    }
+    });
     
     // 显示保存信息
     const message = `内容已保存到: generated/${fileName} (${language.toUpperCase()})`;
