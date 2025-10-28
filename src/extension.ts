@@ -80,7 +80,7 @@ function getConfiguration() {
         temperature: config.get<number>('temperature', 0.1),
         maxTokens: config.get<number>('maxTokens', 2048),
         builtSystemPrompt: promptManager.buildSystemPrompt({}), // 构建后的完整系统提示词
-        timeoutMs: config.get<number>('timeoutMs', 300000), // 增加到5分钟，适合图片分析
+        timeoutMs: config.get<number>('timeoutMs', 120000),
         logLevel: (config.get<string>('logLevel', 'info') as LogLevel) || 'info',
         useDatabase: config.get<boolean>('useDatabase', true),
         maxHistoryDays: config.get<number>('maxHistoryDays', 30),
@@ -1283,7 +1283,7 @@ class ConfigurationPanel {
                     
                     <div class="form-group">
                         <label for="timeoutMs">Timeout (ms):</label>
-                        <input type="number" id="timeoutMs" min="1000" placeholder="300000">
+                        <input type="number" id="timeoutMs" min="1000" placeholder="60000">
                     </div>
                     
                     <div class="form-group">
@@ -1332,9 +1332,6 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     const client = isHttps ? https : http;
 
     return new Promise<string>((resolve, reject) => {
-        let isStreamComplete = false;
-        let hasReceivedData = false;
-        
         const req = client.request(
             {
                 method: 'POST',
@@ -1385,17 +1382,13 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                 // 流式处理响应
                 let full = '';
                 res.setEncoding('utf8');
-                
                 res.on('data', (chunk: string) => {
-                    hasReceivedData = true;
                     const lines = chunk.split(/\r?\n/).filter(Boolean);
                     for (const line of lines) {
                         try {
                             if (line.startsWith('data: ')) {
                                 const data = line.substring(6);
                                 if (data === '[DONE]') {
-                                    isStreamComplete = true;
-                                    log('debug', 'OpenAI stream completed with [DONE] marker');
                                     continue;
                                 }
                                 const obj = JSON.parse(data) as OpenAIChatResponse;
@@ -1405,56 +1398,16 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                                     onChunk?.(piece);
                                 }
                             }
-                        } catch (parseError) {
-                            // 记录解析错误但不中断流
-                            log('debug', 'Stream parsing error (ignored)', { 
-                                line: line.substring(0, 100), 
-                                error: String(parseError) 
-                            });
+                        } catch {
+                            // 忽略解析错误的行
                         }
                     }
                 });
-                
-                res.on('end', () => {
-                    log('debug', 'HTTP response ended', { 
-                        isStreamComplete, 
-                        hasReceivedData, 
-                        contentLength: full.length 
-                    });
-                    
-                    if (!isStreamComplete && hasReceivedData && full.length > 0) {
-                        log('info', 'Stream ended without [DONE] marker, but content received', {
-                            contentLength: full.length,
-                            contentPreview: full.substring(0, 100)
-                        });
-                    }
-                    
-                    if (full.length === 0 && hasReceivedData) {
-                        reject(new Error('Received empty response from AI service'));
-                        return;
-                    }
-                    
-                    resolve(full);
-                });
-                
-                res.on('error', (error) => {
-                    log('info', 'Response stream error', { error: String(error) });
-                    reject(new Error(`Stream error: ${error.message}`));
-                });
+                res.on('end', () => resolve(full));
             }
         );
 
-        req.on('error', (err) => {
-            log('info', 'HTTP request error', { error: String(err) });
-            reject(err);
-        });
-        
-        req.on('timeout', () => {
-            log('info', 'Request timeout', { timeoutMs: cfg.timeoutMs });
-            req.destroy();
-            reject(new Error(`Request timeout after ${cfg.timeoutMs}ms`));
-        });
-        
+        req.on('error', (err) => reject(err));
         req.write(payload);
         req.end();
     });
