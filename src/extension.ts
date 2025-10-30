@@ -123,6 +123,7 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload).toString(),
+            'User-Agent': 'VSCode-GPT-CCDC-Extension/0.0.1',
         };
         if (cfg.apiKey && cfg.apiKey.trim()) {
             headers['Authorization'] = `Bearer ${cfg.apiKey.trim()}`;
@@ -1341,6 +1342,7 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                 headers: {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(payload).toString(),
+                    'User-Agent': 'VSCode-GPT-CCDC-Extension/0.0.1',
                     ...(cfg.apiKey && cfg.apiKey.trim() ? { 'Authorization': `Bearer ${cfg.apiKey.trim()}` } : {}),
                 },
                 timeout: cfg.timeoutMs,

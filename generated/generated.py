@@ -1,22 +1,7 @@
-<template>
+import yaml  
+import os
+import json
 
-    <div>
-        <h1>Hello World</h1>
-    </div>
-
-</template>
-
-
-<script>
-
-    export default {
-    name: 'Component'
-    }
-
-</script>
-
-
-<style scoped>
-    /* 样式 */
-
-</style>
+ns = {'__builtins__': None }
+with open('app.yml', 'r') as file:  
+    config_data= yaml.load(file, Loader=yaml.FullLoader, BuiltinLoader=ns)  
