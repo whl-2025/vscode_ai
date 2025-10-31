@@ -130,6 +130,48 @@ async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> 
         } else {
             maybeWarnMissingApiKey();
         }
+        
+        // 打印请求头日志
+        console.log('========== [请求头日志] ==========');
+        console.log('请求方法:', 'POST');
+        console.log('请求URL:', url.toString());
+        console.log('请求头:', JSON.stringify(headers, null, 2));
+        console.log('Content-Length:', headers['Content-Length'], 'bytes');
+        console.log('User-Agent:', headers['User-Agent']);
+        console.log('Authorization:', headers['Authorization'] ? 'Bearer ***' : '未设置');
+        
+        // 打印系统提示词日志
+        const systemMessage = messages.find(m => m.role === 'system');
+        if (systemMessage) {
+            console.log('========== [系统提示词日志] ==========');
+            console.log('系统提示词长度:', systemMessage.content?.length || 0);
+            console.log('系统提示词预览:', systemMessage.content?.substring(0, 200) + (systemMessage.content && systemMessage.content.length > 200 ? '...' : ''));
+        }
+        
+        // 打印发送内容日志
+        console.log('========== [发送内容日志] ==========');
+        console.log('消息数量:', messages.length);
+        messages.forEach((msg, index) => {
+            console.log(`消息[${index}] 角色:`, msg.role);
+            console.log(`消息[${index}] 内容长度:`, msg.content?.length || 0);
+            if (msg.content && typeof msg.content === 'string') {
+                const preview = msg.content.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
+                console.log(`消息[${index}] 内容预览:`, preview);
+            } else if (Array.isArray(msg.content)) {
+                console.log(`消息[${index}] 多模态内容数量:`, msg.content.length);
+                msg.content.forEach((item: any, itemIndex: number) => {
+                    if (item.type === 'text') {
+                        console.log(`  内容块[${itemIndex}] (text):`, item.text?.substring(0, 200) + '...');
+                    } else if (item.type === 'image_url') {
+                        console.log(`  内容块[${itemIndex}] (image_url):`, item.image_url?.url?.substring(0, 100) + '...');
+                    }
+                });
+            }
+        });
+        console.log('完整Payload长度:', payload.length);
+        console.log('完整Payload预览:', payload.substring(0, 500) + (payload.length > 500 ? '...' : ''));
+        console.log('==========================================');
+        
         const req = client.request(
             {
                 method: 'POST',
@@ -1333,18 +1375,72 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
     const client = isHttps ? https : http;
 
     return new Promise<string>((resolve, reject) => {
+        const headers = {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload).toString(),
+            'User-Agent': 'VSCode-GPT-CCDC-Extension/0.0.1',
+            ...(cfg.apiKey && cfg.apiKey.trim() ? { 'Authorization': `Bearer ${cfg.apiKey.trim()}` } : {}),
+        };
+        
+        // 打印请求头日志
+        console.log('========== [请求头日志] ==========');
+        console.log('请求方法:', 'POST');
+        console.log('请求URL:', url.toString());
+        console.log('请求头:', JSON.stringify(headers, null, 2));
+        console.log('Content-Length:', headers['Content-Length'], 'bytes');
+        console.log('User-Agent:', headers['User-Agent']);
+        console.log('Authorization:', headers['Authorization'] ? 'Bearer ***' : '未设置');
+        
+        // 打印系统提示词日志
+        const systemMessage = messages.find(m => m.role === 'system');
+        if (systemMessage) {
+            console.log('========== [系统提示词日志] ==========');
+            console.log('系统提示词长度:', systemMessage.content?.length || 0);
+            if (typeof systemMessage.content === 'string') {
+                console.log('系统提示词预览:', systemMessage.content.substring(0, 200) + (systemMessage.content.length > 200 ? '...' : ''));
+            } else if (Array.isArray(systemMessage.content)) {
+                console.log('系统提示词多模态内容数量:', systemMessage.content.length);
+                systemMessage.content.forEach((item: any, index: number) => {
+                    if (item.type === 'text') {
+                        console.log(`  内容块[${index}] (text):`, item.text?.substring(0, 200) + '...');
+                    } else if (item.type === 'image_url') {
+                        console.log(`  内容块[${index}] (image_url):`, item.image_url?.url?.substring(0, 100) + '...');
+                    }
+                });
+            }
+        }
+        
+        // 打印发送内容日志
+        console.log('========== [发送内容日志] ==========');
+        console.log('消息数量:', messages.length);
+        messages.forEach((msg, index) => {
+            console.log(`消息[${index}] 角色:`, msg.role);
+            if (typeof msg.content === 'string') {
+                console.log(`消息[${index}] 内容长度:`, msg.content.length);
+                const preview = msg.content.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
+                console.log(`消息[${index}] 内容预览:`, preview);
+            } else if (Array.isArray(msg.content)) {
+                console.log(`消息[${index}] 多模态内容数量:`, msg.content.length);
+                msg.content.forEach((item: any, itemIndex: number) => {
+                    if (item.type === 'text') {
+                        console.log(`  内容块[${itemIndex}] (text):`, item.text?.substring(0, 200) + '...');
+                    } else if (item.type === 'image_url') {
+                        console.log(`  内容块[${itemIndex}] (image_url):`, item.image_url?.url?.substring(0, 100) + '...');
+                    }
+                });
+            }
+        });
+        console.log('完整Payload长度:', payload.length);
+        console.log('完整Payload预览:', payload.substring(0, 500) + (payload.length > 500 ? '...' : ''));
+        console.log('==========================================');
+        
         const req = client.request(
             {
                 method: 'POST',
                 hostname: url.hostname,
                 port: url.port,
                 path: url.pathname,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(payload).toString(),
-                    'User-Agent': 'VSCode-GPT-CCDC-Extension/0.0.1',
-                    ...(cfg.apiKey && cfg.apiKey.trim() ? { 'Authorization': `Bearer ${cfg.apiKey.trim()}` } : {}),
-                },
+                headers: headers,
                 timeout: cfg.timeoutMs,
                 signal,
             },
@@ -2496,6 +2592,25 @@ ${userText ? `问题: ${userText}` : ''}`;
         return cleaned;
     }
 
+    /**
+     * 简单的内容清理方法，用于非 Vue.js 文件
+     * 只移除代码块标记和基本的格式化，保留原始内容结构
+     */
+    private simpleCleanContent(content: string): string {
+        // 移除代码块标记
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除首尾空白
+        cleaned = cleaned.trim();
+        
+        // 如果清理后为空，返回原始内容
+        if (!cleaned) {
+            return content.trim();
+        }
+        
+        return cleaned;
+    }
+
     private removeDuplicateCode(code: string): string {
         // 检测并移除重复的代码块
         const lines = code.split('\n');
@@ -2782,8 +2897,17 @@ ${userText ? `问题: ${userText}` : ''}`;
                 return;
             }
 
-            // 清理模型回答内容
-            const cleanedContent = this.cleanModelResponse(editedContent);
+            // 根据文件类型选择清理方法
+            let cleanedContent: string;
+            const fileExt = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
+            
+            // 对于 Vue.js 文件，使用完整的清理方法
+            if (fileExt === '.vue') {
+                cleanedContent = this.cleanModelResponse(editedContent);
+            } else {
+                // 对于其他文件类型（如 Python、JavaScript 等），使用简单清理
+                cleanedContent = this.simpleCleanContent(editedContent);
+            }
 
             // 确定文件路径
             let targetPath = filePath;
@@ -3797,8 +3921,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                         editedContent: editedContent
                     });
                     
-                    // 移除编辑结果容器
-                    editResultContainer.remove();
+                    // 保持编辑结果容器显示，不隐藏
                 });
                 
                 // 取消按钮
@@ -4851,6 +4974,25 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         return cleaned;
     }
 
+    /**
+     * 简单的内容清理方法，用于非 Vue.js 文件
+     * 只移除代码块标记和基本的格式化，保留原始内容结构
+     */
+    private simpleCleanContent(content: string): string {
+        // 移除代码块标记
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除首尾空白
+        cleaned = cleaned.trim();
+        
+        // 如果清理后为空，返回原始内容
+        if (!cleaned) {
+            return content.trim();
+        }
+        
+        return cleaned;
+    }
+
     private removeDuplicateCode(code: string): string {
         // 检测并移除重复的代码块
         const lines = code.split('\n');
@@ -5085,8 +5227,17 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 return;
             }
 
-            // 清理模型回答内容
-            const cleanedContent = this.cleanModelResponse(editedContent);
+            // 根据文件类型选择清理方法
+            let cleanedContent: string;
+            const fileExt = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
+            
+            // 对于 Vue.js 文件，使用完整的清理方法
+            if (fileExt === '.vue') {
+                cleanedContent = this.cleanModelResponse(editedContent);
+            } else {
+                // 对于其他文件类型（如 Python、JavaScript 等），使用简单清理
+                cleanedContent = this.simpleCleanContent(editedContent);
+            }
             
             // 确定文件路径
             let targetPath = filePath;
@@ -5997,8 +6148,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 editedContent: editedContent
                             });
 
-                            // 移除编辑结果容器
-                            editResultContainer.remove();
+                            // 保持编辑结果容器显示，不隐藏
                         });
 
                         // 取消按钮

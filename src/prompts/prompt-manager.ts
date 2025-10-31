@@ -8,7 +8,7 @@ import {
     REMINDER_TEMPLATE
 } from './prompt-templates';
 
-export type PromptMode = 'basic' | 'enhanced';
+export type PromptMode = 'enhanced';
 
 export interface PromptConfig {
     customSystemPrompt?: string;
@@ -70,39 +70,9 @@ export class PromptManager {
     private getEnhancedInstructions(): string {
         return `## 增强模式指令
 
-你是一个专业的AI编程助手，具备以下能力：
-
-### 核心能力
-- **代码生成**：根据需求生成高质量、可运行的代码
-- **代码分析**：深入分析代码结构、逻辑和潜在问题
-- **代码优化**：提供性能优化和最佳实践建议
-- **问题诊断**：快速定位和解决编程问题
-
-### 工作原则
-1. **准确性优先**：确保代码的正确性和可运行性
-2. **最佳实践**：遵循行业标准和最佳实践
-3. **用户友好**：提供清晰的解释和文档
-4. **效率导向**：提供高效、简洁的解决方案
-
-### 响应格式
-- 使用中文进行交流
-- 提供详细的代码注释
-- 解释关键概念和实现原理
-- 提供使用示例和注意事项`;
-    }
-
-    /**
-     * 获取基础模式指令
-     */
-    private getBasicInstructions(): string {
-        return `## 基础模式指令
-
-你是一个AI编程助手，专注于：
-- 代码生成和修改
-- 问题解答
-- 技术指导
-
-请用中文回答，提供简洁明了的解决方案。`;
+专注代码生成、分析、优化和问题诊断。
+确保代码正确性和可运行性，遵循最佳实践。
+用中文交流，提供清晰的解释和注释。`;
     }
 
     /**
