@@ -7,6 +7,8 @@ import { cleanAICodeResponse } from './code-cleaner';
 import { DatabaseManager, ChatSession, ChatMessage as DBChatMessage, GeneratedFile } from './database-manager';
 import { DatabaseViewer } from './tools/database-viewer';
 import { PromptManager } from './prompts/prompt-manager';
+// ========== 上下文感知功能（已注释） ==========
+// import { ContextCollector } from './context/context-collector';
 import * as path from 'path';
 
 type OpenAIResponse = {
@@ -86,6 +88,11 @@ function getConfiguration() {
         maxHistoryDays: config.get<number>('maxHistoryDays', 30),
         autoSaveGenerated: config.get<boolean>('autoSaveGenerated', true),
         storageStrategy: (config.get<string>('storageStrategy', 'workspace') as 'workspace' | 'global') || 'workspace',
+        // ========== 上下文感知配置（已注释） ==========
+        // autoContextEnabled: config.get<boolean>('autoContext.enabled', true),
+        // workspaceContextEnabled: config.get<boolean>('autoContext.workspaceContext.enabled', true),
+        // historyContextEnabled: config.get<boolean>('autoContext.historyContext.enabled', true),
+        // maxHistoryMessages: config.get<number>('autoContext.historyContext.maxCurrentSessionMessages', 10),
     };
 }
 
@@ -100,6 +107,41 @@ function maybeWarnMissingApiKey() {
 async function callOpenAI(prompt: string, signal: AbortSignal): Promise<string> {
     const cfg = getConfiguration();
     const url = new URL('/v1/chat/completions', cfg.baseUrl);
+
+    // ========== 上下文感知功能（已注释） ==========
+    // async function callOpenAI(
+    //     prompt: string, 
+    //     signal: AbortSignal,
+    //     options?: {
+    //         workspaceContext?: string;
+    //         historyContext?: string;
+    //         sessionId?: string;
+    //     }
+    // ): Promise<string> {
+    //     const cfg = getConfiguration();
+    //     const url = new URL('/v1/chat/completions', cfg.baseUrl);
+    //
+    //     // 构建系统提示词（包含工作区上下文）
+    //     let systemPrompt = cfg.builtSystemPrompt;
+    //     if (options?.workspaceContext && cfg.autoContextEnabled && cfg.workspaceContextEnabled) {
+    //         const promptManager = PromptManager.getInstance();
+    //         systemPrompt = promptManager.buildSystemPrompt({
+    //             workspaceContext: options.workspaceContext
+    //         });
+    //         log('debug', '已注入工作区上下文到系统提示词');
+    //     }
+    //
+    //     // 构建用户消息（包含历史上下文）
+    //     let userMessage = prompt;
+    //     if (options?.historyContext && cfg.autoContextEnabled && cfg.historyContextEnabled) {
+    //         userMessage = prompt + options.historyContext;
+    //         log('debug', '已注入历史上下文到用户消息');
+    //     }
+    //
+    //     const messages = [
+    //         { role: 'system', content: systemPrompt },
+    //         { role: 'user', content: userMessage }
+    //     ];
 
     const messages = [
         { role: 'system', content: cfg.builtSystemPrompt },
@@ -1479,6 +1521,7 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
 
                 // 流式处理响应
                 let full = '';
+                let finishReason: string | undefined = undefined;
                 res.setEncoding('utf8');
                 res.on('data', (chunk: string) => {
                     const lines = chunk.split(/\r?\n/).filter(Boolean);
@@ -1495,13 +1538,29 @@ async function callOpenAIChat(messages: ChatMessage[], signal: AbortSignal, onCh
                                     full += piece;
                                     onChunk?.(piece);
                                 }
+                                // 检查 finish_reason（在流式响应的最后一个数据块中）
+                                if (obj?.choices?.[0]?.finish_reason) {
+                                    finishReason = obj.choices[0].finish_reason;
+                                }
                             }
                         } catch {
                             // 忽略解析错误的行
                         }
                     }
                 });
-                res.on('end', () => resolve(full));
+                res.on('end', () => {
+                    // 如果是因为达到 max_tokens 限制而截断，返回特殊标记
+                    if (finishReason === 'length') {
+                        // 返回包含截断标记的特殊对象
+                        resolve(JSON.stringify({ 
+                            content: full, 
+                            truncated: true,
+                            finishReason: 'length'
+                        }));
+                    } else {
+                        resolve(full);
+                    }
+                });
             }
         );
 
@@ -1680,7 +1739,7 @@ async function saveCodeToFile(code: string, language: string, sessionId?: string
     let fileExtension = '';
 
     // 定义需要保持原有代码清理逻辑的特定语言
-    const specificLanguages = ['java', 'csharp', 'python', 'javascript', 'typescript', 'vue', 'jsx', 'tsx', 'html', 'css', 'sql'];
+    const specificLanguages = ['java', 'csharp', 'python', 'javascript', 'typescript', 'vue', 'jsx', 'tsx', 'html', 'css', 'sql', 'json'];
     
     // 智能判断内容类型，避免误判
     const trimmedCode = code.trim();
@@ -2114,7 +2173,11 @@ class ChatPanel {
                 // 处理停止生成的请求
                 currentController.abort();
                 currentController = null;
-                this._panel.webview.postMessage({ type: 'stopGenerating' });
+                // 发送取消消息，包含解释文本
+                this._panel.webview.postMessage({ 
+                    type: 'stopGenerating',
+                    message: '❌ 已取消生成。您可以重新发送消息继续对话。'
+                });
                 return;
             }
             
@@ -2218,7 +2281,7 @@ class ChatPanel {
             
             // 修复：允许没有text但有fileContent(包括空字符串) 的情况
             if (msg?.type === 'send' && (typeof msg.text === 'string' || Object.prototype.hasOwnProperty.call(msg, 'fileContent'))) {
-                const cfg = getConfiguration();
+                const config = getConfiguration();
                 
                 // 检测编辑意图
                 const userText = msg.text?.trim() || '';
@@ -2245,7 +2308,7 @@ class ChatPanel {
                     msg.fileName = '未知文件';
                 }
                 
-                const system = cfg.builtSystemPrompt?.trim();
+                const system = config.builtSystemPrompt?.trim();
                 
                 // 调试：检查接收到的消息内容
                 log('debug', '收到send消息', {
@@ -2415,10 +2478,10 @@ ${userText ? `问题: ${userText}` : ''}`;
                 
                 // 显示连接信息
                 log('info', '发送消息到AI服务', { 
-                    url: cfg.baseUrl, 
-                    model: cfg.model, 
-                    temperature: cfg.temperature, 
-                    maxTokens: cfg.maxTokens,
+                    url: config.baseUrl, 
+                    model: config.model, 
+                    temperature: config.temperature, 
+                    maxTokens: config.maxTokens,
                     hasFileContent: Object.prototype.hasOwnProperty.call(msg, 'fileContent') && !!msg.fileName,
                     messageLength: userTextForModel.length,
                     hasSystemPrompt: !!(system)
@@ -2431,6 +2494,76 @@ ${userText ? `问题: ${userText}` : ''}`;
                 }
                 
                 this._messages.push({ role: 'user', content: userTextForModel });
+                
+                // ========== 上下文感知功能（已注释） ==========
+                // // 收集上下文（后台自动收集）
+                // // 注意：ChatPanel 不管理 sessionId，但可以通过消息历史推断或创建新会话
+                // // 为了收集历史上下文，我们需要获取或创建一个会话ID
+                // let currentSessionId: string | undefined;
+                // try {
+                //     // 尝试从数据库中获取最近的会话，或创建新会话
+                //     const sessions = await dbManager.getChatSessions();
+                //     if (sessions.length > 0) {
+                //         // 使用最近的会话
+                //         currentSessionId = sessions[0].id;
+                //     }
+                // } catch (error) {
+                //     log('debug', '无法获取会话ID，将不使用历史上下文', { error: String(error) });
+                // }
+                // const contextConfig = getConfiguration();
+                //
+                // if (contextConfig.autoContextEnabled) {
+                //     try {
+                //         const contextCollector = ContextCollector.getInstance();
+                //         const contextInfo = await contextCollector.collectFullContext(
+                //             dbManager,
+                //             currentSessionId,
+                //             {
+                //                 workspaceEnabled: contextConfig.workspaceContextEnabled,
+                //                 historyEnabled: contextConfig.historyContextEnabled,
+                //                 maxHistoryMessages: contextConfig.maxHistoryMessages
+                //             }
+                //         );
+                //
+                //         // 注入工作区上下文到系统提示词
+                //         if (contextInfo.workspace && contextConfig.workspaceContextEnabled) {
+                //             const workspaceContextStr = contextCollector.formatWorkspaceContextForPrompt(contextInfo.workspace);
+                //             const systemMessageIndex = this._messages.findIndex(m => m.role === 'system');
+                //             if (systemMessageIndex >= 0) {
+                //                 const promptManager = PromptManager.getInstance();
+                //                 const enhancedSystemPrompt = promptManager.buildSystemPrompt({
+                //                     workspaceContext: workspaceContextStr
+                //                 });
+                //                 this._messages[systemMessageIndex].content = enhancedSystemPrompt;
+                //                 log('debug', '已注入工作区上下文到系统提示词', {
+                //                     hasStructure: !!contextInfo.workspace.projectStructure,
+                //                     configFilesCount: contextInfo.workspace.configFiles.length,
+                //                     recentFilesCount: contextInfo.workspace.recentFiles.length
+                //                 });
+                //             }
+                //         }
+                //
+                //         // 注入历史上下文到最后一条用户消息
+                //         if (contextInfo.history && contextConfig.historyContextEnabled) {
+                //             const historyContextStr = contextCollector.formatHistoryContextForPrompt(contextInfo.history);
+                //             const lastUserMessageIndex = this._messages.length - 1;
+                //             if (lastUserMessageIndex >= 0 && this._messages[lastUserMessageIndex].role === 'user') {
+                //                 const currentContent = typeof this._messages[lastUserMessageIndex].content === 'string'
+                //                     ? this._messages[lastUserMessageIndex].content
+                //                     : '';
+                //                 this._messages[lastUserMessageIndex].content = currentContent + historyContextStr;
+                //                 log('debug', '已注入历史上下文到用户消息', {
+                //                     hasCurrentSessionHistory: !!contextInfo.history.currentSessionHistory,
+                //                     relatedSessionsCount: contextInfo.history.relatedSessions.length,
+                //                     generatedFilesCount: contextInfo.history.generatedFiles.length
+                //                 });
+                //             }
+                //         }
+                //     } catch (error) {
+                //         log('info', '上下文收集失败，继续发送消息', { error: String(error) });
+                //         // 即使上下文收集失败，也继续发送消息
+                //     }
+                // }
                 
                 // 调试信息：记录发送给AI的完整消息
                 const systemContent = this._messages.find(m => m.role === 'system')?.content;
@@ -2492,13 +2625,27 @@ ${userText ? `问题: ${userText}` : ''}`;
                 
                 let assistantText = '';
                 let gotStreamChunk = false;
+                let isTruncated = false;
                 try {
-                    const text = await callOpenAIChat(this._messages, currentController.signal, (chunk) => {
+                    const response = await callOpenAIChat(this._messages, currentController.signal, (chunk) => {
                         gotStreamChunk = true;
                         assistantText += chunk;
                         this._panel.webview.postMessage({ type: 'appendAssistantChunk', text: chunk });
                     });
-                    assistantText = text || assistantText;
+                    
+                    // 检查响应是否是截断标记（JSON格式的特殊响应）
+                    let responseText = response;
+                    try {
+                        const parsed = JSON.parse(response);
+                        if (parsed.truncated === true) {
+                            isTruncated = true;
+                            responseText = parsed.content;
+                        }
+                    } catch {
+                        // 不是JSON，正常处理
+                    }
+                    
+                    assistantText = responseText || assistantText;
                     if (assistantText) {
                         if (!gotStreamChunk) {
                             // Non-streaming path: push the whole message once
@@ -2507,9 +2654,10 @@ ${userText ? `问题: ${userText}` : ''}`;
                         this._messages.push({ role: 'assistant', content: assistantText });
                         this._panel.webview.postMessage({ 
                             type: 'finalizeAssistant',
-                            hasEditIntent: hasEditIntent && !!(msg.fileContent && msg.fileName)
+                            hasEditIntent: hasEditIntent && !!(msg.fileContent && msg.fileName),
+                            truncated: isTruncated
                         });
-                        log('debug', 'Assistant message generated', { length: assistantText.length });
+                        log('debug', 'Assistant message generated', { length: assistantText.length, truncated: isTruncated });
                     }
                 } catch (err: any) {
                     if (err?.name !== 'AbortError') {
@@ -2608,6 +2756,26 @@ ${userText ? `问题: ${userText}` : ''}`;
             return content.trim();
         }
         
+        return cleaned;
+    }
+
+    /**
+     * 保守的内容清理方法，用于文件编辑结果
+     * 只移除代码块标记，不做任何内容修改，完整保留原始内容
+     */
+    private conservativeCleanContent(content: string): string {
+        // 只移除代码块标记，不做任何其他处理
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除首尾空白
+        cleaned = cleaned.trim();
+        
+        // 如果清理后为空，返回原始内容
+        if (!cleaned) {
+            return content.trim();
+        }
+        
+        // 直接返回清理后的内容，不做任何修改
         return cleaned;
     }
 
@@ -2901,11 +3069,13 @@ ${userText ? `问题: ${userText}` : ''}`;
             let cleanedContent: string;
             const fileExt = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
             
-            // 对于 Vue.js 文件，使用完整的清理方法
+            // 对于文件编辑结果，使用更保守的清理方法，保留原始内容
+            // 只移除代码块标记，不做过度清理
             if (fileExt === '.vue') {
-                cleanedContent = this.cleanModelResponse(editedContent);
+                // 对于 Vue 文件，使用保守清理，保护模板语法
+                cleanedContent = this.conservativeCleanContent(editedContent);
             } else {
-                // 对于其他文件类型（如 Python、JavaScript 等），使用简单清理
+                // 对于其他文件类型，使用简单清理
                 cleanedContent = this.simpleCleanContent(editedContent);
             }
 
@@ -3998,6 +4168,16 @@ ${userText ? `问题: ${userText}` : ''}`;
                     assemblingAssistant = false;
                     hideLoading();
                     
+                    // 检查是否有截断提示
+                    if (msg.truncated && lastAssistantEl) {
+                        const truncateMsgEl = document.createElement('div');
+                        truncateMsgEl.className = 'truncate-message';
+                        truncateMsgEl.style.cssText = 'color: #ffa500; font-size: 12px; margin-top: 8px; padding: 4px 8px; background: rgba(255, 165, 0, 0.1); border-left: 3px solid #ffa500; border-radius: 3px;';
+                        truncateMsgEl.textContent = '⚠️ 回复因 Max Tokens 限制被截断。请在设置中增大 Max Tokens 值以获得完整回复。';
+                        lastAssistantEl.appendChild(truncateMsgEl);
+                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                    }
+                    
                     // 检查是否有编辑意图和文件上下文（只要选择了文件即可）
                     const hasEditIntent = msg.hasEditIntent || false;
                     const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file');
@@ -4049,6 +4229,15 @@ ${userText ? `问题: ${userText}` : ''}`;
                 }
                 if (msg.type === 'stopGenerating') {
                     hideLoading();
+                    // 如果有取消解释消息，在最后一条助手消息下面显示
+                    if (msg.message && lastAssistantEl) {
+                        const cancelMsgEl = document.createElement('div');
+                        cancelMsgEl.className = 'cancel-message';
+                        cancelMsgEl.style.cssText = 'color: #888; font-size: 12px; margin-top: 8px; padding: 4px 8px; font-style: italic;';
+                        cancelMsgEl.textContent = msg.message;
+                        lastAssistantEl.appendChild(cancelMsgEl);
+                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                    }
                 }
                 if (msg.type === 'chatHistoryLoaded') {
                     console.log('ChatPanel: Received chat history from database:', msg.history);
@@ -4784,6 +4973,64 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
         // 保存用户消息到数据库
         const userMessageId = await this.saveMessageToDatabase('user', textToDisplay || '');
         
+        // ========== 上下文感知功能（已注释） ==========
+        // // 收集上下文（后台自动收集）
+        // const currentSessionId = this._currentSessionId;
+        // const contextCfg = getConfiguration();
+        //
+        // if (contextCfg.autoContextEnabled) {
+        //     try {
+        //         const contextCollector = ContextCollector.getInstance();
+        //         const contextInfo = await contextCollector.collectFullContext(
+        //             dbManager,
+        //             currentSessionId || undefined,
+        //             {
+        //                 workspaceEnabled: contextCfg.workspaceContextEnabled,
+        //                 historyEnabled: contextCfg.historyContextEnabled,
+        //                 maxHistoryMessages: contextCfg.maxHistoryMessages
+        //             }
+        //         );
+        //
+        //         // 注入工作区上下文到系统提示词
+        //         if (contextInfo.workspace && contextCfg.workspaceContextEnabled) {
+        //             const workspaceContextStr = contextCollector.formatWorkspaceContextForPrompt(contextInfo.workspace);
+        //             const systemMessageIndex = this._messages.findIndex(m => m.role === 'system');
+        //             if (systemMessageIndex >= 0) {
+        //                 const promptManager = PromptManager.getInstance();
+        //                 const enhancedSystemPrompt = promptManager.buildSystemPrompt({
+        //                     workspaceContext: workspaceContextStr
+        //                 });
+        //                 this._messages[systemMessageIndex].content = enhancedSystemPrompt;
+        //                 log('debug', 'ChatViewProvider: 已注入工作区上下文到系统提示词', {
+        //                     hasStructure: !!contextInfo.workspace.projectStructure,
+        //                     configFilesCount: contextInfo.workspace.configFiles.length,
+        //                     recentFilesCount: contextInfo.workspace.recentFiles.length
+        //                 });
+        //             }
+        //         }
+        //
+        //         // 注入历史上下文到最后一条用户消息
+        //         if (contextInfo.history && contextCfg.historyContextEnabled) {
+        //             const historyContextStr = contextCollector.formatHistoryContextForPrompt(contextInfo.history);
+        //             const lastUserMessageIndex = this._messages.length - 1;
+        //             if (lastUserMessageIndex >= 0 && this._messages[lastUserMessageIndex].role === 'user') {
+        //                 const currentContent = typeof this._messages[lastUserMessageIndex].content === 'string'
+        //                     ? this._messages[lastUserMessageIndex].content
+        //                     : '';
+        //                 this._messages[lastUserMessageIndex].content = currentContent + historyContextStr;
+        //                 log('debug', 'ChatViewProvider: 已注入历史上下文到用户消息', {
+        //                     hasCurrentSessionHistory: !!contextInfo.history.currentSessionHistory,
+        //                     relatedSessionsCount: contextInfo.history.relatedSessions.length,
+        //                     generatedFilesCount: contextInfo.history.generatedFiles.length
+        //                 });
+        //             }
+        //         }
+        //     } catch (error) {
+        //         log('info', 'ChatViewProvider: 上下文收集失败，继续发送消息', { error: String(error) });
+        //         // 即使上下文收集失败，也继续发送消息
+        //     }
+        // }
+        
         // 创建新的控制器用于这次请求
         this._currentController = new AbortController();
         const currentController = this._currentController; // 保存引用
@@ -4808,6 +5055,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 hasController: !!currentController
             });
 
+            let isTruncated = false;
             const response = await callOpenAIChat(this._messages, currentController.signal, (chunk) => {
                 // 确保这是当前请求的响应
                 if (currentController === this._currentController) {
@@ -4823,7 +5071,19 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 return;
             }
             
-            assistantText = response || assistantText;
+            // 检查响应是否是截断标记（JSON格式的特殊响应）
+            let responseText = response;
+            try {
+                const parsed = JSON.parse(response);
+                if (parsed.truncated === true) {
+                    isTruncated = true;
+                    responseText = parsed.content;
+                }
+            } catch {
+                // 不是JSON，正常处理
+            }
+            
+            assistantText = responseText || assistantText;
             if (assistantText) {
                 if (!gotStreamChunk) {
                     // Non-streaming path: push the whole message once
@@ -4832,16 +5092,30 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 this._messages.push({ role: 'assistant', content: assistantText });
                 this._view?.webview.postMessage({ 
                     type: 'finalizeAssistant',
-                    hasEditIntent: hasEditIntent && !!(fileContent && fileName)
+                    hasEditIntent: hasEditIntent && !!(fileContent && fileName),
+                    truncated: isTruncated
                 });
 
                 // 保存助手消息到数据库
                 const assistantMessageId = await this.saveMessageToDatabase('assistant', assistantText);
 
-                // 只有在非编辑模式下才自动保存生成的代码
-                if (!(hasEditIntent && !!(fileContent && fileName))) {
+                // 只有在非编辑模式下且启用自动保存时才自动保存生成的代码
+                const cfg = getConfiguration();
+                if (cfg.autoSaveGenerated && !(hasEditIntent && !!(fileContent && fileName))) {
+                    // 定义需要自动保存的特定语言（需要清理逻辑的语言）
+                    const specificLanguages = ['java', 'csharp', 'python', 'javascript', 'typescript', 'vue', 'jsx', 'tsx', 'html', 'css', 'sql', 'json'];
                     const language = detectLanguageFromCode(assistantText);
-                    await saveCodeToFile(assistantText, language, this._currentSessionId || undefined, assistantMessageId || undefined);
+                    const normalizedLanguage = language.toLowerCase();
+                    
+                    // 只自动保存特定语言，txt 文件不自动保存
+                    if (specificLanguages.includes(normalizedLanguage)) {
+                        await saveCodeToFile(assistantText, language, this._currentSessionId || undefined, assistantMessageId || undefined);
+                    } else {
+                        log('info', 'ChatViewProvider: 跳过 txt 文件的自动保存', { 
+                            language: language,
+                            normalizedLanguage: normalizedLanguage
+                        });
+                    }
                 }
                 
                 // 如果是第一条用户消息，更新会话标题
@@ -4921,7 +5195,11 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             log('info', 'ChatViewProvider: 停止当前请求');
             this._currentController.abort();
             this._currentController = null;
-            this._view?.webview.postMessage({ type: 'stopGenerating' });
+            // 发送取消消息，包含解释文本
+            this._view?.webview.postMessage({ 
+                type: 'stopGenerating',
+                message: '❌ 已取消生成。您可以重新发送消息继续对话。'
+            });
         }
     }
 
@@ -4990,6 +5268,26 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             return content.trim();
         }
         
+        return cleaned;
+    }
+
+    /**
+     * 保守的内容清理方法，用于文件编辑结果
+     * 只移除代码块标记，不做任何内容修改，完整保留原始内容
+     */
+    private conservativeCleanContent(content: string): string {
+        // 只移除代码块标记，不做任何其他处理
+        let cleaned = content.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '');
+        
+        // 移除首尾空白
+        cleaned = cleaned.trim();
+        
+        // 如果清理后为空，返回原始内容
+        if (!cleaned) {
+            return content.trim();
+        }
+        
+        // 直接返回清理后的内容，不做任何修改
         return cleaned;
     }
 
@@ -5231,11 +5529,13 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
             let cleanedContent: string;
             const fileExt = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
             
-            // 对于 Vue.js 文件，使用完整的清理方法
+            // 对于文件编辑结果，使用更保守的清理方法，保留原始内容
+            // 只移除代码块标记，不做过度清理
             if (fileExt === '.vue') {
-                cleanedContent = this.cleanModelResponse(editedContent);
+                // 对于 Vue 文件，使用保守清理，保护模板语法
+                cleanedContent = this.conservativeCleanContent(editedContent);
             } else {
-                // 对于其他文件类型（如 Python、JavaScript 等），使用简单清理
+                // 对于其他文件类型，使用简单清理
                 cleanedContent = this.simpleCleanContent(editedContent);
             }
             
@@ -5605,7 +5905,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     font-size: 12px;
                     color: var(--vscode-foreground);
                     position: absolute;
-                    top: -70px;
+                    top: -50px;
                     left: 0;
                     right: 0;
                     z-index: 1000;
@@ -6368,6 +6668,16 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 assemblingAssistant = false;
                                 hideLoading(); // 隐藏加载状态
                                 
+                                // 检查是否有截断提示
+                                if (message.truncated && lastAssistantEl) {
+                                    const truncateMsgEl = document.createElement('div');
+                                    truncateMsgEl.className = 'truncate-message';
+                                    truncateMsgEl.style.cssText = 'color: #ffa500; font-size: 12px; margin-top: 8px; padding: 4px 8px; background: rgba(255, 165, 0, 0.1); border-left: 3px solid #ffa500; border-radius: 3px;';
+                                    truncateMsgEl.textContent = '⚠️ 回复因 Max Tokens 限制被截断。请在设置中增大 Max Tokens 值以获得完整回复。';
+                                    lastAssistantEl.appendChild(truncateMsgEl);
+                                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                                }
+                                
                                 // 检查是否有编辑意图和文件上下文（只要选择了文件即可）
                                 const hasEditIntent = message.hasEditIntent || false;
                                 const hasFileContext = selectedContexts.length > 0 && selectedContexts.some(ctx => ctx.contextType === 'file');
@@ -6411,7 +6721,16 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                             case 'stopGenerating':
                                 hideLoading(); // 隐藏加载状态
                                 assemblingAssistant = false; // 重置组装状态
-                                lastAssistantEl = null; // 重置助手消息元素
+                                // 如果有取消解释消息，在最后一条助手消息下面显示
+                                if (message.message && lastAssistantEl) {
+                                    const cancelMsgEl = document.createElement('div');
+                                    cancelMsgEl.className = 'cancel-message';
+                                    cancelMsgEl.style.cssText = 'color: #888; font-size: 12px; margin-top: 8px; padding: 4px 8px; font-style: italic;';
+                                    cancelMsgEl.textContent = message.message;
+                                    lastAssistantEl.appendChild(cancelMsgEl);
+                                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                                }
+                                // 注意：不重置 lastAssistantEl，保持它以便显示取消消息
                                 break;
                             case 'cleared':
                                 messagesEl.innerHTML = '';

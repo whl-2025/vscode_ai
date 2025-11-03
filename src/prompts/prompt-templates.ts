@@ -41,7 +41,6 @@ export const CODE_GENERATION_INSTRUCTIONS = `生成代码时：
 - 所有注释使用中文
 - 输出完整可运行代码`;
 
-
 // 上下文模板
 export const CONTEXT_TEMPLATE = `
 <context>
@@ -56,3 +55,7 @@ export const REMINDER_TEMPLATE = `
 <reminder>
 编辑时使用注释标记未更改区域。
 </reminder>`;
+
+// ========== 上下文感知功能（已注释） ==========
+// // 精简后的基础身份定义（合并所有重复内容）
+// export const BASE_IDENTITY = `你是编程助手，用中文分析和生成代码。生成代码时直接输出完整代码，不使用代码块标记，注释用中文。`;
