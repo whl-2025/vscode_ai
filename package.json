@@ -196,7 +196,8 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "watch": "tsc -w -p ."
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
   },
   "dependencies": {
     "sqlite3": "^5.1.6"
@@ -208,6 +209,7 @@
     "@types/sqlite3": "^3.1.8",
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.22.0",
     "typescript": "^5.4.0"
   }
 }
