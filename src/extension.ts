@@ -3529,12 +3529,165 @@ ${userText ? `问题: ${userText}` : ''}`;
                     top: -60px;
                 }
             }
+            .msg h1, .msg h2, .msg h3 {
+                color: var(--fg);
+                margin: 16px 0 8px 0;
+                font-weight: 600;
+            }
+            .msg h1 { font-size: 1.5em; border-bottom: 1px solid #666; padding-bottom: 4px; }
+            .msg h2 { font-size: 1.3em; }
+            .msg h3 { font-size: 1.1em; }
+            .msg p { margin: 8px 0; line-height: 1.5; }
+            .msg ul, .msg ol { margin: 8px 0; padding-left: 20px; }
+            .msg li { margin: 4px 0; }
+            .msg blockquote {
+                border-left: 4px solid #4e94ce;
+                margin: 8px 0;
+                padding: 8px 12px;
+                background: rgba(78, 148, 206, 0.1);
+                font-style: italic;
+            }
+            .msg code {
+                background: rgba(255, 255, 255, 0.1);
+                padding: 2px 4px;
+                border-radius: 3px;
+                font-family: 'Courier New', monospace;
+                font-size: 0.9em;
+            }
+            .msg pre {
+                background: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 6px;
+                padding: 12px;
+                margin: 8px 0;
+                overflow-x: auto;
+            }
+            .msg pre code {
+                background: none;
+                padding: 0;
+                font-size: 0.85em;
+                line-height: 1.4;
+            }
+            .msg table {
+                border-collapse: collapse;
+                margin: 8px 0;
+                width: 100%;
+            }
+            .msg th, .msg td {
+                border: 1px solid #666;
+                padding: 6px 8px;
+                text-align: left;
+            }
+            .msg th {
+                background: rgba(255, 255, 255, 0.1);
+                font-weight: 600;
+            }
+            .msg a {
+                color: #4e94ce;
+                text-decoration: none;
+            }
+            .msg a:hover {
+                text-decoration: underline;
+            }
+            .msg strong {
+                font-weight: 600;
+                color: var(--fg);
+            }
+            .msg em {
+                font-style: italic;
+                color: #cccccc;
+            }
+            .msg .language-javascript,
+            .msg .language-typescript,
+            .msg .language-js,
+            .msg .language-ts {
+                color: #f8f8f2;
+            }
+            .msg .language-python {
+                color: #66d9ef;
+            }
+            .msg .language-html {
+                color: #f92672;
+            }
+            .msg .language-css {
+                color: #a6e22e;
+            }
+            .msg .language-json {
+                color: #e6db74;
+            }
         `;
 
         const script = `
             const vscode = acquireVsCodeApi();
             const messagesEl = document.getElementById('messages');
             const inputEl = document.getElementById('input');
+            
+            // 完全离线的Markdown渲染器
+            function safeMarkdownRender(text, element) {
+                console.log('ChatPanel: safeMarkdownRender called', {
+                    textLength: text ? text.length : 0,
+                    hasElement: !!element
+                });
+                
+                if (!text) {
+                    element.innerHTML = '';
+                    return;
+                }
+                
+                let html = text;
+                
+                // 转义HTML特殊字符
+                html = html.replace(/&/g, '&amp;')
+                          .replace(/</g, '&lt;')
+                          .replace(/>/g, '&gt;')
+                          .replace(/"/g, '&quot;')
+                          .replace(/'/g, '&#39;');
+                
+                // 处理代码块
+                html = html.replace(/\`\`\`([a-zA-Z]*)?\\n([\\s\\S]*?)\\n\`\`\`/g, function(match, lang, code) {
+                    return '<pre><code class="language-' + (lang || 'text') + '">' + code + '</code></pre>';
+                });
+                
+                // 处理行内代码
+                html = html.replace(/\`([^\`\\n]+)\`/g, '<code>$1</code>');
+                
+                // 处理标题
+                html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+                html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+                html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+                
+                // 处理粗体
+                html = html.replace(/\\*\\*([^\\*]+)\\*\\*/g, '<strong>$1</strong>');
+                
+                // 处理斜体
+                html = html.replace(/\\*([^\\*\\n]+)\\*/g, '<em>$1</em>');
+                
+                // 处理列表
+                html = html.replace(/^[\\*\\-\\+] (.+$)/gm, '<li>$1</li>');
+                html = html.replace(/^\\d+\\. (.+$)/gm, '<li>$1</li>');
+                html = html.replace(/((<li>.*?<\\/li>\\s*)+)/g, '<ul>$1</ul>');
+                
+                // 处理链接
+                html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
+                
+                // 处理引用
+                html = html.replace(/^> (.+$)/gm, '<blockquote>$1</blockquote>');
+                
+                // 处理换行
+                html = html.replace(/\\n\\n+/g, '</p><p>');
+                html = html.replace(/\\n/g, '<br>');
+                
+                // 包装段落
+                if (!html.match(/^\\s*<(h[1-6]|pre|ul|ol|blockquote|hr)/)) {
+                    html = '<p>' + html + '</p>';
+                }
+                
+                // 清理空段落
+                html = html.replace(/<p>\\s*<\\/p>/g, '');
+                
+                element.innerHTML = html;
+                console.log('ChatPanel: Markdown rendered successfully');
+            }
             
             // 检测用户是否有编辑文件的意图
             function detectEditIntent(userText) {
@@ -3699,9 +3852,16 @@ ${userText ? `问题: ${userText}` : ''}`;
                 
                 // 添加文本内容
                 if (text) {
-                    const textEl = document.createElement('div');
-                    textEl.textContent = text;
-                    el.appendChild(textEl);
+                    if (role === 'assistant') {
+                        // AI回复使用Markdown渲染
+                        safeMarkdownRender(text, el);
+                    } else {
+                        // 用户消息保持纯文本
+                        el.textContent = text;
+                    }
+                } else if (role === 'assistant') {
+                    // 为流式渲染准备空元素
+                    el.setAttribute('data-raw-text', '');
                 }
                 
                 messagesEl.appendChild(el);
@@ -4158,10 +4318,20 @@ ${userText ? `问题: ${userText}` : ''}`;
                 if (msg.type === 'appendUser') {
                     append('user', msg.text || '', msg.fileInfo || null);
                     lastAssistantEl = append('assistant', '');
+                    // 为流式渲染初始化
+                    if (lastAssistantEl) {
+                        lastAssistantEl.setAttribute('data-raw-text', '');
+                    }
                     assemblingAssistant = true;
                 }
                 if (msg.type === 'appendAssistantChunk' && assemblingAssistant && lastAssistantEl) {
-                    lastAssistantEl.textContent = (lastAssistantEl.textContent || '') + (msg.text || '');
+                    // 累积文本内容
+                    const currentText = lastAssistantEl.getAttribute('data-raw-text') || '';
+                    const newText = currentText + (msg.text || '');
+                    lastAssistantEl.setAttribute('data-raw-text', newText);
+                    
+                    // 实时渲染Markdown
+                    safeMarkdownRender(newText, lastAssistantEl);
                     messagesEl.scrollTop = messagesEl.scrollHeight;
                 }
                 if (msg.type === 'finalizeAssistant') {
@@ -4195,7 +4365,9 @@ ${userText ? `问题: ${userText}` : ''}`;
                     if (hasEditIntent && hasFileContext && lastAssistantEl) {
                         console.log('进入编辑模式，显示编辑结果');
                         // 编辑模式：显示编辑后的内容并提供保存选项
-                        showEditResult(lastAssistantEl.textContent || '', selectedContexts[0]);
+                        // 获取原始文本内容而不是渲染后的HTML
+                        const rawText = lastAssistantEl.getAttribute('data-raw-text') || lastAssistantEl.textContent || '';
+                        showEditResult(rawText, selectedContexts[0]);
                     } else {
                         console.log('进入普通模式，添加保存按钮');
                         // 普通模式：添加保存按钮
@@ -4313,6 +4485,7 @@ ${userText ? `问题: ${userText}` : ''}`;
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>AI Assistant</title>
                 <style>${style}</style>
+
             </head>
             <body>
                 <div class="container">
@@ -5641,7 +5814,7 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     justify-content: center;
                     min-width: 32px;
                     height: 32px;
-                    marigin-left: -10px;
+                    margin-left: -10px;
                 }
                 .header-btn:hover {
                     background: #3e3e42;
@@ -5749,6 +5922,92 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 .assistant {
                     background: rgba(40, 40, 40, 0.3);
                     border-left: 3px solid #666;
+                }
+                .message-content h1, .message-content h2, .message-content h3 {
+                    color: var(--vscode-foreground);
+                    margin: 16px 0 8px 0;
+                    font-weight: 600;
+                }
+                .message-content h1 { font-size: 1.5em; border-bottom: 1px solid #666; padding-bottom: 4px; }
+                .message-content h2 { font-size: 1.3em; }
+                .message-content h3 { font-size: 1.1em; }
+                .message-content p { margin: 8px 0; line-height: 1.5; }
+                .message-content ul, .message-content ol { margin: 8px 0; padding-left: 20px; }
+                .message-content li { margin: 4px 0; }
+                .message-content blockquote {
+                    border-left: 4px solid #0078d4;
+                    margin: 8px 0;
+                    padding: 8px 12px;
+                    background: rgba(0, 120, 212, 0.1);
+                    font-style: italic;
+                }
+                .message-content code {
+                    background: rgba(255, 255, 255, 0.1);
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 0.9em;
+                }
+                .message-content pre {
+                    background: #1e1e1e;
+                    border: 1px solid #333;
+                    border-radius: 6px;
+                    padding: 12px;
+                    margin: 8px 0;
+                    overflow-x: auto;
+                }
+                .message-content pre code {
+                    background: none;
+                    padding: 0;
+                    font-size: 0.85em;
+                    line-height: 1.4;
+                }
+                .message-content table {
+                    border-collapse: collapse;
+                    margin: 8px 0;
+                    width: 100%;
+                }
+                .message-content th, .message-content td {
+                    border: 1px solid #666;
+                    padding: 6px 8px;
+                    text-align: left;
+                }
+                .message-content th {
+                    background: rgba(255, 255, 255, 0.1);
+                    font-weight: 600;
+                }
+                .message-content a {
+                    color: #0078d4;
+                    text-decoration: none;
+                }
+                .message-content a:hover {
+                    text-decoration: underline;
+                }
+                .message-content strong {
+                    font-weight: 600;
+                    color: var(--vscode-foreground);
+                }
+                .message-content em {
+                    font-style: italic;
+                    color: #cccccc;
+                }
+                .message-content .language-javascript,
+                .message-content .language-typescript,
+                .message-content .language-js,
+                .message-content .language-ts {
+                    color: #f8f8f2;
+                }
+                .message-content .language-python {
+                    color: #66d9ef;
+                }
+                .message-content .language-html {
+                    color: #f92672;
+                }
+                .message-content .language-css {
+                    color: #a6e22e;
+                }
+                .message-content .language-json {
+                    color: #e6db74;
                 }
                 .input-section {
                     border-top: 1px solid var(--vscode-panel-border);
@@ -6028,9 +6287,99 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                 </div>
             </div>
             
+
             <script nonce="${nonce}">
                 (function() {
                     const vscode = acquireVsCodeApi();
+                    
+                    // 检查Markdown库是否加载成功
+                    function checkLibraries() {
+                        console.log('Checking libraries...');
+                        console.log('marked available:', typeof marked !== 'undefined');
+                        console.log('Prism available:', typeof Prism !== 'undefined');
+                        
+                        if (typeof marked === 'undefined') {
+                            console.warn('Marked library not loaded, falling back to plain text');
+                        }
+                        if (typeof Prism === 'undefined') {
+                            console.warn('Prism library not loaded, no syntax highlighting');
+                        }
+                    }
+                    
+                    // 页面加载完成后检查库
+                    window.addEventListener('load', checkLibraries);
+                    
+                    // 立即检查库（可能已经加载）
+                    setTimeout(checkLibraries, 100);
+                    setTimeout(checkLibraries, 500);
+                    setTimeout(checkLibraries, 1000);
+                    
+                    // 完全离线的Markdown渲染器
+                    function safeMarkdownRender(text, element) {
+                        console.log('ChatViewProvider: safeMarkdownRender called', {
+                            textLength: text ? text.length : 0,
+                            hasElement: !!element
+                        });
+                        
+                        if (!text) {
+                            element.innerHTML = '';
+                            return;
+                        }
+                        
+                        let html = text;
+                        
+                        // 转义HTML特殊字符
+                        html = html.replace(/&/g, '&amp;')
+                                  .replace(/</g, '&lt;')
+                                  .replace(/>/g, '&gt;')
+                                  .replace(/"/g, '&quot;')
+                                  .replace(/'/g, '&#39;');
+                        
+                        // 处理代码块
+                        html = html.replace(/\`\`\`([a-zA-Z]*)?\\n([\\s\\S]*?)\\n\`\`\`/g, function(match, lang, code) {
+                            return '<pre><code class="language-' + (lang || 'text') + '">' + code + '</code></pre>';
+                        });
+                        
+                        // 处理行内代码
+                        html = html.replace(/\`([^\`\\n]+)\`/g, '<code>$1</code>');
+                        
+                        // 处理标题
+                        html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+                        html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+                        html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+                        
+                        // 处理粗体
+                        html = html.replace(/\\*\\*([^\\*]+)\\*\\*/g, '<strong>$1</strong>');
+                        
+                        // 处理斜体
+                        html = html.replace(/\\*([^\\*\\n]+)\\*/g, '<em>$1</em>');
+                        
+                        // 处理列表
+                        html = html.replace(/^[\\*\\-\\+] (.+$)/gm, '<li>$1</li>');
+                        html = html.replace(/^\\d+\\. (.+$)/gm, '<li>$1</li>');
+                        html = html.replace(/((<li>.*?<\\/li>\\s*)+)/g, '<ul>$1</ul>');
+                        
+                        // 处理链接
+                        html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
+                        
+                        // 处理引用
+                        html = html.replace(/^> (.+$)/gm, '<blockquote>$1</blockquote>');
+                        
+                        // 处理换行
+                        html = html.replace(/\\n\\n+/g, '</p><p>');
+                        html = html.replace(/\\n/g, '<br>');
+                        
+                        // 包装段落
+                        if (!html.match(/^\\s*<(h[1-6]|pre|ul|ol|blockquote|hr)/)) {
+                            html = '<p>' + html + '</p>';
+                        }
+                        
+                        // 清理空段落
+                        html = html.replace(/<p>\\s*<\\/p>/g, '');
+                        
+                        element.innerHTML = html;
+                        console.log('ChatViewProvider: Markdown rendered successfully');
+                    }
                     
                     // 检测用户是否有编辑文件的意图
                     function detectEditIntent(userText) {
@@ -6258,20 +6607,50 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                     
                     // 添加消息到聊天区域
                     function addMessage(type, text, fileInfo = null) {
+                        console.log('ChatViewProvider: addMessage called', {
+                            type: type,
+                            textLength: text ? text.length : 0,
+                            hasText: !!text
+                        });
+                        
                         const messageEl = document.createElement('div');
                         messageEl.className = 'message ' + type;
                         
                         // 不单独显示文件信息，因为displayText已经包含了文件信息
                         
                         // 添加文本内容
-                        if (text) {
+                        if (text || type === 'assistant') {
                             const textEl = document.createElement('div');
-                            textEl.textContent = text;
+                            textEl.className = 'message-content';
+                            
+                            if (type === 'assistant') {
+                                // AI回复使用Markdown渲染
+                                if (text) {
+                                    safeMarkdownRender(text, textEl);
+                                }
+                                // 为流式渲染准备
+                                textEl.setAttribute('data-raw-text', text || '');
+                                console.log('ChatViewProvider: 创建assistant消息元素', {
+                                    hasContentEl: true,
+                                    initialText: text || ''
+                                });
+                            } else {
+                                // 用户消息保持纯文本
+                                textEl.textContent = text;
+                            }
+                            
                             messageEl.appendChild(textEl);
                         }
                         
                         messagesEl.appendChild(messageEl);
                         messagesEl.scrollTop = messagesEl.scrollHeight;
+                        
+                        console.log('ChatViewProvider: 消息已添加到DOM', {
+                            messageElClass: messageEl.className,
+                            hasContentChild: messageEl.querySelector('.message-content') !== null,
+                            messagesCount: messagesEl.children.length
+                        });
+                        
                         return messageEl;
                     }
                     
@@ -6659,9 +7038,37 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 assemblingAssistant = true;
                                 break;
                             case 'appendAssistantChunk':
+                                console.log('ChatViewProvider: 收到appendAssistantChunk', {
+                                    assemblingAssistant: assemblingAssistant,
+                                    hasLastAssistantEl: !!lastAssistantEl,
+                                    messageText: message.text
+                                });
                                 if (assemblingAssistant && lastAssistantEl) {
-                                    lastAssistantEl.textContent = (lastAssistantEl.textContent || '') + (message.text || '');
+                                    const contentEl = lastAssistantEl.querySelector('.message-content');
+                                    console.log('ChatViewProvider: contentEl found:', !!contentEl);
+                                    if (contentEl) {
+                                        // 累积文本内容
+                                        const currentText = contentEl.getAttribute('data-raw-text') || '';
+                                        const newText = currentText + (message.text || '');
+                                        contentEl.setAttribute('data-raw-text', newText);
+                                        
+                                        console.log('ChatViewProvider: 渲染文本', {
+                                            currentLength: currentText.length,
+                                            newLength: newText.length,
+                                            chunk: message.text
+                                        });
+                                        
+                                        // 实时渲染Markdown
+                                        safeMarkdownRender(newText, contentEl);
+                                    } else {
+                                        console.error('ChatViewProvider: 找不到.message-content元素');
+                                    }
                                     messagesEl.scrollTop = messagesEl.scrollHeight;
+                                } else {
+                                    console.log('ChatViewProvider: 跳过appendAssistantChunk', {
+                                        assemblingAssistant: assemblingAssistant,
+                                        hasLastAssistantEl: !!lastAssistantEl
+                                    });
                                 }
                                 break;
                             case 'finalizeAssistant':
@@ -6695,7 +7102,9 @@ ${originalUserText ? `问题: ${originalUserText}` : ''}`;
                                 if (hasEditIntent && hasFileContext && lastAssistantEl) {
                                     console.log('ChatPanel 进入编辑模式，显示编辑结果');
                                     // 编辑模式：显示编辑后的内容并提供保存选项
-                                    showEditResult(lastAssistantEl.textContent || '', selectedContexts[0]);
+                                    // 获取原始文本内容而不是渲染后的HTML
+                                    const rawText = lastAssistantEl.getAttribute('data-raw-text') || lastAssistantEl.textContent || '';
+                                    showEditResult(rawText, selectedContexts[0]);
                                 } else {
                                     console.log('ChatPanel 进入普通模式，添加保存按钮');
                                     // 普通模式：添加保存按钮
